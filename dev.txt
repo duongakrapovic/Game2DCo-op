@@ -1,0 +1,5 @@
+make this doc so that anyone can know what i did in the commit 
+reformat the structure , form local to 2 mode:
+- 1 is p2p similar as create room in back for blood or gunfire reborn
+- 2 is dedicated server similar as ark or palworld 
+still has no code 
