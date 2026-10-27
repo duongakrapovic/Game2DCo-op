@@ -3,3 +3,26 @@ reformat the structure , form local to 2 mode:
 - 1 is p2p similar as create room in back for blood or gunfire reborn
 - 2 is dedicated server similar as ark or palworld 
 still has no code 
+----------------------------------------------------------------------------
+chạy file bằng lệnh trong terminal: run-server.bat và run-client.bat 
+in common/src/protocol
+- add command: định nghĩa thao tác điều khiển , demo trái phải 2 cục vuông 
+in server
+    main : khởi tạo cổng 8888 lắng nghe các client.
+    core/TCPServer :Mở socket lắng nghe và quản lý các kết nối mạng TCP đi vào
+        Sử dụng ServerSocket(8888) chạy trong một luồng riêng. Khi có một Client mới 
+        kết nối (serverSocket.accept()), class này sẽ bàn giao kết nối đó cho ClientHandler 
+        và thêm người chơi vào Room
+    core/ ClientHandler Quản lý kênh giao tiếp hai chiều (đọc/ghi dữ liệu) với duy nhất một Client.
+        Mỗi Client kết nối vào Server sẽ có 1 luồng ClientHandler riêng. 
+in client
+    main : tạo của sổ jpanel, tạo tcp client và giao diện game panel , hộp thoại jOptionPanel để nhập ip chơi 
+        sau này sẽ dùng zerotier để có thể chơi game online được
+    network/TCPClient: Quản lý kết nối mạng TCP từ phía Client tới Server.
+        tạo 1 luồng riêng liên tục lắng nghe chuỗi STATE từ Server trả về, 
+        tách lấy dữ liệu tọa độ p1X, p2X và gọi gamePanel.updatePositions() 
+        để vẽ lại giao diện. Ngoài ra, nó cung cấp hàm sendMove() để gửi thao tác bấm phím lên Server.
+    ui/gamePanel: Xử lý giao diện đồ họa (Java Swing) và nhận đầu vào từ bàn phím người dùng
+        tcpClient.sendMove() để gửi lệnh di chuyển lên Server
+        Lớp vẽ (paintComponent)
+        
