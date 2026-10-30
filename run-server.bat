@@ -1,14 +1,12 @@
 @echo off
-title Server - Game 2D Co-op
+title Dedicated Server
 echo [1/2] Dang bien dich Server...
-javac -encoding UTF-8 -cp "source/common/src;source/server/src" source/server/src/Main.java
-
-if %ERRORLEVEL% NEQ 0 (
-    echo [LOI] Bien dich Server thất bại!
+javac -encoding UTF-8 source/common/*.java source/server/*.java
+if %errorlevel% neq 0 (
+    echo Bien dich Server THAT BAI!
     pause
-    exit /b %ERRORLEVEL%
+    exit /b
 )
-
 echo [2/2] Dang chay Server...
-java -cp "source/common/src;source/server/src" Main
+java -cp . source.server.ServerApp
 pause
