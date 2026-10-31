@@ -25,4 +25,52 @@ in client
     ui/gamePanel: Xử lý giao diện đồ họa (Java Swing) và nhận đầu vào từ bàn phím người dùng
         tcpClient.sendMove() để gửi lệnh di chuyển lên Server
         Lớp vẽ (paintComponent)
-        
+--------------------------------------------------------------------
+30/10  xóa hết và format lại luôn , tận dung game offline 2d cũ,
+ https://github.com/duongakrapovic/2DJavaGame
+đã làm xong xong cho hiện map và vị trí player.
+game play 2.5D , khám phá bản đồ . 
+--------------------------------------------------------------------
+31/10  Tái cấu trúc (Refactor) toàn bộ kiến trúc codebase theo hướng hiện đại:
+
+[1] Chuyển PhysicsEngine từ source.server sang source.common
+    - Xóa source/server/PhysicsEngine.java
+    - Tạo mới source/common/PhysicsEngine.java
+    - Client không còn import chéo sang package server
+    - Server (GameRoom.java) cập nhật import sang source.common.PhysicsEngine
+    - Thêm hỗ trợ DeltaTime: updatePlayer(Player, MapManager, float dt)
+    - Overload updatePlayer(Player, MapManager) tương thích ngược cho GameRoom
+
+[2] Tách riêng AnimationController (source/common/AnimationController.java)
+    - Quản lý nhịp bước chân (spriteNum 1<->2) độc lập với logic vật lý
+    - Điều tiết tốc độ đổi frame qua ticksPerFrame (mặc định 6 tick ~ 100ms)
+    - Player.java tích hợp sẵn: public AnimationController anim
+    - PhysicsEngine gọi p.anim.update(p, isMoving) thay vì tự đổi chân
+    - Xóa bỏ lỗi nhấp nháy sprite 60Hz và code animation trùng lặp ở 2 nơi
+
+[3] Quản lý Sprite bằng Map<String, Image[]> thay vì 8 biến rời rạc
+    - Thay up1, up2, down1, down2, left1, left2, right1, right2 bằng:
+      Map<String, Image[]> spriteMap
+    - Nạp tự động qua vòng lặp 4 hướng trong loadAssets()
+    - Xóa bỏ khối switch-case 20 dòng trong GamePanel.paintComponent()
+    - Lấy sprite khi vẽ chỉ còn 2 dòng:
+      Image[] frames = spriteMap.get(p.direction);
+      Image currentSprite = frames[p.spriteNum - 1];
+
+[4] Dedicated Game Loop Thread + Fixed Timestep / DeltaTime (Offline)
+    - Bỏ javax.swing.Timer(16) chạy trên EDT (Event Dispatch Thread)
+    - Tạo luồng riêng "Local-GameLoop-Thread" cho chế độ Offline
+    - Đo dt = (now - lastTime) / 1_000_000_000.0f mỗi frame
+    - Giới hạn max dt = 0.1f để tránh lỗi vật lý khi bị lag
+    - Ổn định 60 FPS, repaint() chỉ được gọi từ luồng game, không block UI
+
+[5] Main Scene (Menu Screen) thay thế JOptionPane
+    - Mặc định khởi động vào màn hình MENU (CardLayout: MENU / LOBBY / GAME)
+    - Nền gradient tối phong cách Dungeon, tiêu đề "DUNGEON CO-OP"
+    - 3 nút lựa chọn rõ ràng:
+        🎮 Chơi Offline (Luyện tập / Test)   -> startLocalGame()
+        🌐 Chơi Online (Sảnh phòng)           -> connectToServer(host)
+        🚪 Thoát Game                          -> System.exit(0)
+    - Nút "⬅ Quay lại Menu" trong Lobby để ngắt kết nối an toàn
+    - Phím ESC trong Game hiện hộp thoại xác nhận quay về Menu
+    - Hỗ trợ CLI flag: java -cp . source.client.ClientApp --offline

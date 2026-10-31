@@ -3,6 +3,7 @@ package source.server;
 import source.common.Common;
 import source.common.MapManager;
 import source.common.Player;
+import source.common.PhysicsEngine;
 import java.io.PrintWriter;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -59,16 +60,18 @@ public class GameRoom implements Runnable {
     }
 
     private void broadcastState() {
-        StringBuilder sb = new StringBuilder(Common.CMD_STATE);
-        for (Player p : players.values()) {
-            sb.append(";").append(p.id).append(",")
-              .append(p.name).append(",")
-              .append((int) p.x).append(",")
-              .append((int) p.y);
-        }
-        String msg = sb.toString();
-        for (PrintWriter out : writers.values()) {
-            out.println(msg);
-        }
+    StringBuilder sb = new StringBuilder(Common.CMD_STATE);
+    for (Player p : players.values()) {
+        sb.append(";").append(p.id).append(",")
+          .append(p.name).append(",")
+          .append((int) p.x).append(",")
+          .append((int) p.y).append(",")
+          .append(p.direction).append(",")
+          .append(p.spriteNum);
     }
+    String msg = sb.toString();
+    for (PrintWriter out : writers.values()) {
+        out.println(msg);
+    }
+}
 }

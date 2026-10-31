@@ -1,0 +1,23 @@
+# Bỏ qua tất cả các file .class được biên dịch ra
+*.class
+
+# Bỏ qua thư mục build / bin của IDE
+bin/
+build/
+out/
+.gradle/
+
+# Bỏ qua các file cấu hình riêng của VS Code & Eclipse
+.settings/
+.classpath
+.project
+.vscode/
+*.log
+
+# CHỈ GIỮ LẠI MÃ NGUỒN VÀ DỮ LIỆU GAME (những gì cần đẩy)
+!source/
+!content/
+!run-server.bat
+!run-client.bat
+!.gitignore
+!README.md
