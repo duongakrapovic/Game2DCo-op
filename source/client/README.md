@@ -1,15 +1,14 @@
-# MODULE CLIENT
-
-> 📘 *Sinh viên mô tả phần **client** tại đây. Điền đầy đủ theo framework và bài toán của nhóm.*
+# MODULE CLIENT – Game Client (Java Swing)
 
 ---
 
 ## 🎯 MỤC TIÊU
 
 Client chịu trách nhiệm:
-- Gửi yêu cầu đến server
-- Hiển thị kết quả cho người dùng
-- Cung cấp giao diện tương tác
+- Hiển thị giao diện đồ họa game (tile map + nhân vật) bằng Java Swing
+- Nhận đầu vào bàn phím (WASD / mũi tên) và gửi lên server
+- Kết nối TCP tới server, nhận trạng thái game (`STATE`) và render
+- Hỗ trợ **chế độ Offline** (chơi đơn, không cần server)
 
 ---
 
@@ -17,58 +16,87 @@ Client chịu trách nhiệm:
 
 | Thành phần | Công nghệ |
 |------------|-----------|
-| Ngôn ngữ | Node.js / Python / Java / ... |
-| Thư viện chính | Axios / Requests / ... |
-| Giao thức | HTTP / WebSocket / ... |
+| Ngôn ngữ | Java 17+ |
+| Giao diện | Java Swing (`JFrame`, `JPanel`, `CardLayout`) |
+| Mạng | `java.net.Socket` (TCP client) |
+| Đa luồng | Thread lắng nghe server, Timer 60FPS render |
+| Bản đồ | `MapManager` (load + vẽ tilemap TMX) |
 
 ---
 
 ## 🚀 HƯỚNG DẪN CHẠY
 
-### Cài đặt
+### Cách 1: Dùng file bat (khuyên dùng)
 ```bash
-# Ví dụ với Node.js
-npm install
-
-# Hoặc với Python
-pip install -r requirements.txt
+# Chạy từ thư mục gốc của project
+run-client.bat
 ```
 
-### Chạy chương trình
+### Cách 2: Thủ công
 ```bash
-# Ví dụ
-node main.js
-# hoặc
-python client.py
+# Đứng ở thư mục gốc project
+javac -encoding UTF-8 source/common/*.java source/server/PhysicsEngine.java source/client/*.java
+java -cp . source.client.ClientApp
 ```
 
-### Cấu hình (nếu cần)
-- Server URL: `http://localhost:8080`
-- Có thể thay đổi trong file `config.js` hoặc `.env`
+### Chế độ khởi chạy
+Khi chạy, một hộp thoại sẽ hiện ra:
+
+| Tùy chọn | Mô tả |
+|----------|-------|
+| **Test Offline** | Chơi đơn ngay lập tức, không cần server, physics chạy tại client |
+| **Online** | Nhập IP server → Nhập tên → Vào sảnh chờ, tạo/vào phòng |
 
 ---
 
-## 📦 CẤU TRÚC
+## 📦 CẤU TRÚC MODULE
+
 ```
-client/
+source/client/
 ├── README.md
-├── main.js (hoặc client.py)
-├── config.js
-└── lib/
-    └── helper.js
+└── ClientApp.java    ← Toàn bộ logic client: UI, network, render, input
 ```
+
+### Các thành phần trong `ClientApp.java`
+
+| Thành phần | Mô tả |
+|------------|-------|
+| `main()` | Hộp thoại chọn chế độ, kết nối TCP nếu Online |
+| `createLobbyUI()` | Sảnh chờ: danh sách phòng, nút Tạo/Vào/Làm mới |
+| `GamePanel` | Vẽ tile map và nhân vật lên màn hình |
+| `updateKey()` | Xử lý phím bấm, gửi `INPUT` lên server |
+| Listener thread | Đọc gói tin `STATE` / `ROOM_LIST` / `ERROR` từ server |
 
 ---
 
-## 💡 SỬ DỤNG
-```bash
-# Ví dụ gửi request
-node main.js --input "data"
+## 🎮 ĐIỀU KHIỂN
+
+| Phím | Hành động |
+|------|-----------|
+| `W` / `↑` | Di chuyển lên |
+| `S` / `↓` | Di chuyển xuống |
+| `A` / `←` | Di chuyển trái |
+| `D` / `→` | Di chuyển phải |
+
+Di chuyển chéo (VD: `W + D`) tự động chuẩn hóa tốc độ (nhân `√2/2 ≈ 0.707`).
+
+---
+
+## 💡 LUỒNG HOẠT ĐỘNG (ONLINE)
+
+```
+1. Kết nối TCP tới server:8888
+2. Server gửi ROOM_LIST → hiện sảnh chờ
+3. Người chơi tạo/vào phòng
+4. Mỗi khi bấm phím → gửi INPUT lên server
+5. Server tính physics → gửi STATE về
+6. Client nhận STATE → cập nhật renderPlayers → repaint()
 ```
 
 ---
 
 ## 📝 GHI CHÚ
 
-- Đảm bảo server đã chạy trước khi khởi động client
-- Mặc định kết nối đến `localhost:8080`
+- Client kết nối mặc định tới `localhost:8888` — nhập IP khác khi chạy
+- Tài nguyên bản đồ (`tileset.png`, `chunk*.tmx`) đọc từ `source/content/map/`
+- Chạy client từ **thư mục gốc project** để đường dẫn tài nguyên hoạt động đúng

@@ -1,0 +1,11 @@
+timestamp,player_id,player_name,pos_x,pos_y,input_left,input_right,input_up,input_down,room_name
+1730000000000,P1,Duc,704,576,false,false,false,false,DungeonA
+1730000000016,P1,Duc,704,576,false,true,false,false,DungeonA
+1730000000032,P1,Duc,708,576,false,true,false,false,DungeonA
+1730000000048,P1,Duc,712,576,false,true,false,false,DungeonA
+1730000000064,P1,Duc,716,576,false,false,false,false,DungeonA
+1730000000016,P2,Hien,704,576,false,false,false,false,DungeonA
+1730000000032,P2,Hien,700,576,true,false,false,false,DungeonA
+1730000000048,P2,Hien,696,576,true,false,false,false,DungeonA
+1730000000064,P2,Hien,696,572,false,false,true,false,DungeonA
+1730000000080,P2,Hien,696,568,false,false,true,false,DungeonA

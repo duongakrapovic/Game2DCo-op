@@ -1,6 +1,6 @@
-# BÀI TẬP LỚN: LẬP TRÌNH MẠNG  
+# BÀI TẬP LỚN: LẬP TRÌNH MẠNG
 
-## [Game 2D Co-op]
+## 🎮 Game 2D Co-op – Dungeon Crawler
 
 ---
 
@@ -8,27 +8,33 @@
 
 | STT | Họ và Tên | MSSV | Email | Đóng góp |
 |-----|-----------|------|-------|----------|
-| 1 | Nguyễn Văn A | 20IT001 | a@example.com | ... |
-| 2 | Trần Thị B | 20IT002 | b@example.com | ... |
-| 3 | Lê Văn C | 20IT003 | c@example.com | ... |
+| 1 | Trần Văn Đức | B23DCCN191 | b23dccn191@ptit.edu.vn | *(xem commit history)* |
+| 2 | Nguyễn Minh Hiền | B23DCCN289 | b23dccn289@ptit.edu.vn | *(xem commit history)* |
+| 3 | Vũ Hải Dương | B23DCCN233 | b23dccn233@ptit.edu.vn | *(xem commit history)* |
 
-**Tên nhóm:** Nhóm 01 – Lập trình mạng  
-**Chủ đề đã đăng ký:** (…)
+**Tên nhóm:** Nhóm 6 – Lập trình mạng  
+**Chủ đề đã đăng ký:** Game 2D Co-op
 
 ---
 
 ## 🧠 MÔ TẢ HỆ THỐNG
 
-> Mô tả tổng quan hệ thống mà nhóm triển khai.
+Hệ thống là một **game 2D top-down co-op nhiều người chơi** xây dựng hoàn toàn bằng Java thuần.
 
-Ví dụ:
-> Hệ thống bao gồm **server** xử lý yêu cầu và **client** gửi yêu cầu đến server qua giao thức HTTP.  
-> Server cung cấp API cho phép tính toán đơn giản hoặc truyền dữ liệu.  
-> Client có thể là chương trình CLI, web hoặc ứng dụng desktop.
+- **Server** (Dedicated Server): Tiếp nhận kết nối TCP từ nhiều client, quản lý các phòng chơi (Game Room), chạy vòng lặp vật lý game ở tốc độ 60 FPS và broadcast trạng thái game cho toàn bộ người chơi trong phòng.
+- **Client**: Giao diện đồ họa Java Swing, cho phép người chơi tạo/vào phòng, di chuyển nhân vật bằng phím WASD hoặc mũi tên. Client hỗ trợ cả chế độ **Offline Test** (không cần server) lẫn **Online** (kết nối server qua TCP).
+- **Common**: Module dùng chung giữa server và client — hằng số giao thức, quản lý bản đồ (Tiled TMX chunks), vật lý va chạm.
 
 **Cấu trúc logic tổng quát:**
 ```
-client  <-->  server  <-->  (database / service nếu có)
+[ClientApp A] ──┐
+[ClientApp B] ──┼──TCP:8888──► [ServerApp]
+[ClientApp C] ──┘                   │
+                               [GameRoom]
+                               (quản lý phòng, physics 60FPS)
+                                    │
+                              [MapManager]
+                              (9 chunks TMX 3×3)
 ```
 
 **Sơ đồ hệ thống:**
@@ -39,56 +45,95 @@ client  <-->  server  <-->  (database / service nếu có)
 
 ## ⚙️ CÔNG NGHỆ SỬ DỤNG
 
-> Liệt kê công nghệ, framework, thư viện chính mà nhóm sử dụng.
-
 | Thành phần | Công nghệ | Ghi chú |
 |------------|-----------|---------|
-| Server | Python 3.11 + Flask | REST API |
-| Client | Node.js 20 + Axios | Giao tiếp HTTP |
-| Database | SQLite | Lưu trữ dữ liệu tạm thời |
-| Triển khai | Docker | (nếu có) |
+| Ngôn ngữ | Java 17+ | Không cần framework ngoài |
+| Giao thức mạng | TCP Socket (java.net) | Plain-text, line-delimited |
+| Giao diện | Java Swing (JFrame, JPanel) | Render tile map + player |
+| Bản đồ | Tiled TMX (CSV encoding) | 9 chunk 32×32 tiles |
+| Build | `javac` + `.bat` script | Không cần Maven/Gradle |
+| Port | `8888` | Có thể đổi trong `Common.java` |
 
 ---
 
 ## 🚀 HƯỚNG DẪN CHẠY DỰ ÁN
 
+### Yêu cầu
+- **Java JDK 17+** đã được cài và thêm vào PATH
+
 ### 1. Clone repository
 ```bash
-git clone <repository-url>
-cd assignment-network-project
+git clone https://github.com/duongakrapovic/Game2DCo-op.git
+cd Game2DCo-op
 ```
 
-### 2. Chạy server
+### 2. Chạy Server (nếu chơi Online)
+Double-click file `run-server.bat` hoặc chạy lệnh:
 ```bash
-cd source/server
-# Các lệnh để khởi động server
+run-server.bat
 ```
+Server sẽ tự động compile và lắng nghe tại **port 8888**.
 
-### 3. Chạy client
+### 3. Chạy Client
+Double-click file `run-client.bat` hoặc chạy lệnh:
 ```bash
-cd source/client
-# Các lệnh để khởi động client
+run-client.bat
 ```
+Khi khởi động, client hiển thị hộp thoại chọn chế độ:
+- **"Test Offline (Không cần Server)"** — Chơi đơn, không cần chạy server
+- **"Online (Kết nối Server)"** — Nhập IP server → Nhập tên người chơi → Vào sảnh chờ
 
-### 4. Kiểm thử nhanh
-```bash
-# Các lệnh test
-```
+### 4. Điều khiển
+| Phím | Hành động |
+|------|-----------|
+| `W` / `↑` | Di chuyển lên |
+| `S` / `↓` | Di chuyển xuống |
+| `A` / `←` | Di chuyển trái |
+| `D` / `→` | Di chuyển phải |
+
+### 5. Chơi Online (nhiều người)
+1. Một người chạy `run-server.bat`
+2. Tất cả người chơi chạy `run-client.bat` → chọn **Online** → nhập IP của người chạy server
+3. Một người chọn **"Tạo phòng"** → những người khác chọn phòng và nhấn **"Vào phòng"**
+
+> **Lưu ý:** Để chơi qua Internet mà không có IP public, dùng **ZeroTier** hoặc **Hamachi** để tạo mạng LAN ảo.
 
 ---
 
 ## 🔗 GIAO TIẾP (GIAO THỨC SỬ DỤNG)
 
-| Endpoint | Protocol | Method | Input | Output |
-|----------|----------|--------|-------|--------|
-| `/health` | HTTP/1.1 | GET | — | `{"status": "ok"}` |
-| `/compute` | HTTP/1.1 | POST | `{"task":"sum","payload":[1,2,3]}` | `{"result":6}` |
+Giao thức TCP plain-text, mỗi lệnh là một dòng (`\n`), các trường phân cách bằng `:` hoặc `;`.
+
+### Client → Server
+
+| Lệnh | Định dạng | Mô tả |
+|------|-----------|-------|
+| Lấy danh sách phòng | `ROOM_LIST` | Yêu cầu server gửi danh sách phòng hiện tại |
+| Tạo phòng | `CREATE_ROOM:<tênPhòng>:<tênNgườiChơi>` | Tạo phòng mới và vào ngay |
+| Vào phòng | `JOIN_ROOM:<tênPhòng>:<tênNgườiChơi>` | Vào phòng đã có |
+| Gửi đầu vào | `INPUT:<left>:<right>:<up>:<down>` | Gửi trạng thái phím bấm (true/false) |
+
+### Server → Client
+
+| Lệnh | Định dạng | Mô tả |
+|------|-----------|-------|
+| Danh sách phòng | `ROOM_LIST;<phòng1> (N người);<phòng2>...` | Broadcast khi có thay đổi |
+| Trạng thái game | `STATE;<id1>,<tên1>,<x1>,<y1>;<id2>,...` | Broadcast 60 lần/giây |
+| Lỗi | `ERROR:<thôngBáo>` | Phòng đã tồn tại / không tồn tại |
+
+**Ví dụ luồng kết nối:**
+```
+Server → Client : ROOM_LIST                          (gửi ngay khi client kết nối)
+Client → Server : CREATE_ROOM:DungeonA:Duc           (tạo phòng)
+Server → Client : STATE;P1,Duc,704,576               (loop 60FPS)
+Client → Server : INPUT:false:true:false:false       (bấm phím D - đi phải)
+```
 
 ---
 
 ## 📊 KẾT QUẢ THỰC NGHIỆM
 
-> Đưa ảnh chụp kết quả hoặc mô tả log chạy thử.
+> Xem ảnh chụp kết quả chạy thử tại thư mục `statics/`.
 
 ![Demo Result](./statics/result.png)
 
@@ -96,43 +141,60 @@ cd source/client
 
 ## 🧩 CẤU TRÚC DỰ ÁN
 ```
-assignment-network-project/
-├── README.md
-├── INSTRUCTION.md
+Game2DCo-op/
+├── README.md                    ← Tài liệu dự án
+├── INSTRUCTION.md               ← Hướng dẫn GV (không chỉnh sửa)
+├── run-server.bat               ← Script compile + chạy server
+├── run-client.bat               ← Script compile + chạy client
 ├── statics/
-│   ├── diagram.png
-│   └── dataset_sample.csv
+│   ├── diagram.png              ← Sơ đồ hệ thống
+│   ├── logo.png
+│   └── dataset_sample.csv      ← Mẫu dữ liệu game state log
 └── source/
     ├── .gitignore
-    ├── client/
-    │   ├── README.md
-    │   └── (client source files...)
+    ├── common/                  ← Dùng chung server & client
+    │   ├── Common.java          ← Hằng số: PORT, TILE_SIZE, lệnh giao thức
+    │   ├── Player.java          ← Model người chơi (vị trí, vận tốc, input)
+    │   └── MapManager.java      ← Load & render bản đồ TMX chunk
     ├── server/
     │   ├── README.md
-    │   └── (server source files...)
-    └── (các module khác nếu có)
+    │   ├── ServerApp.java       ← Entry point server, vòng lặp accept TCP
+    │   ├── GameRoom.java        ← Quản lý phòng chơi, game loop 60FPS
+    │   └── PhysicsEngine.java   ← Tính vật lý top-down, xử lý va chạm tile
+    ├── client/
+    │   ├── README.md
+    │   └── ClientApp.java       ← Entry point client, UI Swing, kết nối TCP
+    └── content/
+        └── map/                 ← 9 file chunk TMX (3×3) + tileset
+            ├── tileset.png
+            ├── tileset.tsx
+            ├── chunk0_0.tmx ... chunk2_2.tmx
 ```
 
 ---
 
 ## 🧩 HƯỚNG PHÁT TRIỂN THÊM
 
-> Nêu ý tưởng mở rộng hoặc cải tiến hệ thống.
-
-- [ ] Cải thiện giao diện người dùng
-- [ ] Thêm tính năng xác thực và phân quyền
-- [ ] Tối ưu hóa hiệu suất
-- [ ] Triển khai trên cloud
+- [ ] Thêm lệnh `CHAT` để người chơi nhắn tin trong phòng
+- [ ] Giới hạn số người tối đa mỗi phòng (`MAX_PLAYERS_PER_ROOM`)
+- [ ] Thêm trạng thái `GAME_START` / `GAME_OVER`
+- [ ] Thêm mob/enemy do server điều khiển
+- [ ] Hỗ trợ kết nối qua Internet với ZeroTier
+- [ ] Lưu log game state ra file CSV
 
 ---
 
 ## 📝 GHI CHÚ
 
 - Repo tuân thủ đúng cấu trúc đã hướng dẫn trong `INSTRUCTION.md`.
-- Đảm bảo test kỹ trước khi submit.
+- File `INSTRUCTION.md` **không được chỉnh sửa** theo quy định.
+- Toàn bộ logic vật lý (va chạm tile) chạy **phía server** — client chỉ render.
 
 ---
 
 ## 📚 TÀI LIỆU THAM KHẢO
 
-> (Nếu có) Liệt kê các tài liệu, API docs, hoặc nguồn tham khảo đã sử dụng.
+- [Java TCP Socket – Oracle Docs](https://docs.oracle.com/javase/tutorial/networking/sockets/)
+- [Tiled Map Editor](https://www.mapeditor.org/) – Công cụ thiết kế bản đồ TMX
+- [Java Swing Tutorial](https://docs.oracle.com/javase/tutorial/uiswing/)
+- [ZeroTier – LAN ảo qua Internet](https://www.zerotier.com/)
