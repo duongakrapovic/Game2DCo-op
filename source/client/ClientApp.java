@@ -4,6 +4,7 @@ import source.common.Common;
 import source.common.MapManager;
 import source.common.PhysicsEngine;
 import source.common.Player;
+import source.common.Enemy;
 
 import javax.imageio.ImageIO;
 import javax.swing.*;
@@ -23,13 +24,25 @@ public class ClientApp extends JFrame {
         public int x, y;
         public String direction = "down"; // "up", "down", "left", "right"
         public int spriteNum = 1;        // 1 hoặc 2
+        public boolean enemy;
+        public int health = 100;
 
         public RenderPlayer(String name, int x, int y, String direction, int spriteNum) {
+            this(name, x, y, direction, spriteNum, false);
+        }
+
+        public RenderPlayer(String name, int x, int y, String direction, int spriteNum, boolean enemy) {
+            this(name, x, y, direction, spriteNum, enemy, 100);
+        }
+
+        public RenderPlayer(String name, int x, int y, String direction, int spriteNum, boolean enemy, int health) {
             this.name = name;
             this.x = x;
             this.y = y;
             this.direction = direction;
             this.spriteNum = spriteNum;
+            this.enemy = enemy;
+            this.health = Math.max(0, Math.min(100, health));
         }
     }
 
@@ -55,6 +68,7 @@ public class ClientApp extends JFrame {
     // Chế độ Offline Test (Dedicated Thread + DeltaTime)
     private boolean isOfflineMode = false;
     private Player localPlayer;
+    private java.util.List<Enemy> localEnemies = new java.util.ArrayList<>();
     private Thread localGameThread;
     private volatile boolean isLocalRunning = false;
 
@@ -322,13 +336,18 @@ public class ClientApp extends JFrame {
         setTitle("Dungeon Co-op Game [OFFLINE TEST]");
 
         localPlayer = new Player("LOCAL_1", myName);
+        localEnemies = new java.util.ArrayList<>();
+        localEnemies.add(new Enemy("E_SOLDIER", "Linh", 26 * Common.TILE_SIZE, 18 * Common.TILE_SIZE, 85f));
+        localEnemies.add(new Enemy("E_MONSTER", "Quai", 18 * Common.TILE_SIZE, 24 * Common.TILE_SIZE, 115f));
         renderPlayers.clear();
         renderPlayers.put("LOCAL_1", new RenderPlayer(
             myName, 
             (int) localPlayer.x, 
             (int) localPlayer.y, 
             localPlayer.direction, 
-            localPlayer.spriteNum
+            localPlayer.spriteNum,
+            false,
+            localPlayer.health
         ));
 
         isLocalRunning = true;
@@ -354,6 +373,7 @@ public class ClientApp extends JFrame {
 
                 // 2. Tính toán vật lý và animation bước chân qua PhysicsEngine trong common
                 PhysicsEngine.updatePlayer(localPlayer, mapManager, dt);
+                for (Enemy enemy : localEnemies) enemy.update(localPlayer, mapManager, dt);
 
                 // 3. Cập nhật trạng thái hiển thị
                 renderPlayers.put("LOCAL_1", new RenderPlayer(
@@ -361,8 +381,14 @@ public class ClientApp extends JFrame {
                     (int) localPlayer.x, 
                     (int) localPlayer.y, 
                     localPlayer.direction, 
-                    localPlayer.spriteNum
+                    localPlayer.spriteNum,
+                    false,
+                    localPlayer.health
                 ));
+                for (Enemy enemy : localEnemies) {
+                    renderPlayers.put(enemy.id, new RenderPlayer(enemy.name, (int) enemy.x, (int) enemy.y,
+                            enemy.direction, 1, true));
+                }
 
                 // 4. Yêu cầu vẽ lại trên Event Dispatch Thread
                 gamePanel.repaint();
@@ -438,7 +464,9 @@ public class ClientApp extends JFrame {
                                         Integer.parseInt(pData[2]), 
                                         Integer.parseInt(pData[3]), 
                                         pData[4], 
-                                        Integer.parseInt(pData[5])
+                                        Integer.parseInt(pData[5]),
+                                        pData[0].startsWith("E_"),
+                                        pData.length >= 7 ? Integer.parseInt(pData[6]) : 100
                                     ));
                                 }
                             }
@@ -577,11 +605,13 @@ public class ClientApp extends JFrame {
 
             int myX = (int) Common.SPAWN_X;
             int myY = (int) Common.SPAWN_Y;
+            int myHealth = 100;
 
             for (RenderPlayer p : renderPlayers.values()) {
                 if (p.name.equals(myName)) {
                     myX = p.x;
                     myY = p.y;
+                    myHealth = p.health;
                     break;
                 }
             }
@@ -612,13 +642,18 @@ public class ClientApp extends JFrame {
                 // Lấy ảnh sprite từ Map<Direction, Image[]>
                 Image[] frames = spriteMap.get(p.direction);
                 Image currentSprite = null;
-                if (frames != null && frames.length > 0) {
+                if (!p.enemy && frames != null && frames.length > 0) {
                     int frameIdx = (p.spriteNum == 2 && frames.length > 1) ? 1 : 0;
                     currentSprite = frames[frameIdx];
                 }
 
                 if (currentSprite != null) {
                     g2.drawImage(currentSprite, screenX, screenY, playerRenderSize, playerRenderSize, null);
+                } else if (p.enemy) {
+                    g2.setColor("Linh".equals(p.name) ? new Color(190, 65, 55) : new Color(145, 65, 190));
+                    g2.fillOval(screenX + 2, screenY + 2, playerRenderSize - 4, playerRenderSize - 4);
+                    g2.setColor(Color.WHITE);
+                    g2.drawOval(screenX + 2, screenY + 2, playerRenderSize - 4, playerRenderSize - 4);
                 } else {
                     g2.setColor(p.name.equals(myName) ? Color.CYAN : Color.GREEN);
                     g2.fillRect(screenX, screenY, playerRenderSize, playerRenderSize);
@@ -628,6 +663,17 @@ public class ClientApp extends JFrame {
                 g2.setFont(new Font("Arial", Font.PLAIN, 12));
                 g2.drawString(p.name, screenX - 5, screenY - 5);
             }
+
+            g2.setColor(new Color(0, 0, 0, 170));
+            g2.fillRoundRect(16, 16, 224, 38, 10, 10);
+            g2.setColor(Color.WHITE);
+            g2.drawString("HP", 26, 40);
+            g2.setColor(Color.DARK_GRAY);
+            g2.fillRoundRect(54, 27, 174, 16, 8, 8);
+            g2.setColor(myHealth > 30 ? new Color(65, 200, 90) : new Color(225, 65, 55));
+            g2.fillRoundRect(54, 27, Math.max(0, 174 * myHealth / 100), 16, 8, 8);
+            g2.setColor(Color.WHITE);
+            g2.drawString(myHealth + "/100", 111, 40);
         }
     }
 

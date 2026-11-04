@@ -8,6 +8,7 @@ public class Player {
     public float y = Common.SPAWN_Y;
     
     public float vx = 0, vy = 0;
+    public int health = 100;
     
     // Nút bấm di chuyển Top-Down
     public boolean left = false, right = false, up = false, down = false;
@@ -27,5 +28,6 @@ public class Player {
         this.y = Common.SPAWN_Y;
         this.vx = 0;
         this.vy = 0;
+        this.health = 100;
     }
 }
