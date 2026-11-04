@@ -5,6 +5,7 @@ import source.common.MapManager;
 import source.common.PhysicsEngine;
 import source.common.Player;
 import source.common.Enemy;
+import source.common.EnemyManager;
 
 import javax.imageio.ImageIO;
 import javax.swing.*;
@@ -68,7 +69,7 @@ public class ClientApp extends JFrame {
     // Chế độ Offline Test (Dedicated Thread + DeltaTime)
     private boolean isOfflineMode = false;
     private Player localPlayer;
-    private java.util.List<Enemy> localEnemies = new java.util.ArrayList<>();
+    private EnemyManager localEnemyManager = new EnemyManager();
     private Thread localGameThread;
     private volatile boolean isLocalRunning = false;
 
@@ -336,9 +337,7 @@ public class ClientApp extends JFrame {
         setTitle("Dungeon Co-op Game [OFFLINE TEST]");
 
         localPlayer = new Player("LOCAL_1", myName);
-        localEnemies = new java.util.ArrayList<>();
-        localEnemies.add(new Enemy("E_SOLDIER", "Linh", 26 * Common.TILE_SIZE, 18 * Common.TILE_SIZE, 85f));
-        localEnemies.add(new Enemy("E_MONSTER", "Quai", 18 * Common.TILE_SIZE, 24 * Common.TILE_SIZE, 115f));
+        localEnemyManager = new EnemyManager();
         renderPlayers.clear();
         renderPlayers.put("LOCAL_1", new RenderPlayer(
             myName, 
@@ -373,7 +372,7 @@ public class ClientApp extends JFrame {
 
                 // 2. Tính toán vật lý và animation bước chân qua PhysicsEngine trong common
                 PhysicsEngine.updatePlayer(localPlayer, mapManager, dt);
-                for (Enemy enemy : localEnemies) enemy.update(localPlayer, mapManager, dt);
+                localEnemyManager.update(java.util.Collections.singletonList(localPlayer), mapManager, dt);
 
                 // 3. Cập nhật trạng thái hiển thị
                 renderPlayers.put("LOCAL_1", new RenderPlayer(
@@ -385,7 +384,7 @@ public class ClientApp extends JFrame {
                     false,
                     localPlayer.health
                 ));
-                for (Enemy enemy : localEnemies) {
+                for (Enemy enemy : localEnemyManager.getEnemies()) {
                     renderPlayers.put(enemy.id, new RenderPlayer(enemy.name, (int) enemy.x, (int) enemy.y,
                             enemy.direction, 1, true));
                 }
@@ -650,10 +649,7 @@ public class ClientApp extends JFrame {
                 if (currentSprite != null) {
                     g2.drawImage(currentSprite, screenX, screenY, playerRenderSize, playerRenderSize, null);
                 } else if (p.enemy) {
-                    g2.setColor("Linh".equals(p.name) ? new Color(190, 65, 55) : new Color(145, 65, 190));
-                    g2.fillOval(screenX + 2, screenY + 2, playerRenderSize - 4, playerRenderSize - 4);
-                    g2.setColor(Color.WHITE);
-                    g2.drawOval(screenX + 2, screenY + 2, playerRenderSize - 4, playerRenderSize - 4);
+                    EnemyRenderer.draw(g2, p.name, screenX, screenY, playerRenderSize);
                 } else {
                     g2.setColor(p.name.equals(myName) ? Color.CYAN : Color.GREEN);
                     g2.fillRect(screenX, screenY, playerRenderSize, playerRenderSize);
