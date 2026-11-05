@@ -4,6 +4,7 @@ import source.common.Common;
 import source.common.MapManager;
 import source.common.PhysicsEngine;
 import source.common.Player;
+import source.common.Protocol;
 
 import javax.imageio.ImageIO;
 import javax.swing.*;
@@ -12,6 +13,8 @@ import java.awt.event.*;
 import java.io.*;
 import java.net.Socket;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -19,6 +22,7 @@ public class ClientApp extends JFrame {
 
     // Lớp chứa dữ liệu đồng bộ để hiển thị Player lên màn hình
     public static class RenderPlayer {
+        public String id;   // id do server cấp (null ở chế độ Offline)
         public String name;
         public int x, y;
         public String direction = "down"; // "up", "down", "left", "right"
@@ -40,14 +44,23 @@ public class ClientApp extends JFrame {
     private final Map<String, RenderPlayer> renderPlayers = new ConcurrentHashMap<>();
     private String myName = "Player_" + (int) (Math.random() * 100);
 
-    // Network I/O
-    private Socket socket;
-    private PrintWriter out;
-    private BufferedReader in;
-    private Thread netListenThread;
+    // Network (xem NetClient / ClientPrediction / SnapshotInterpolator)
+    private volatile NetClient net;
+    private volatile String myId = "";
+    private final ClientPrediction prediction;
+    private final SnapshotInterpolator interp = new SnapshotInterpolator();
+    private final Map<String, String> playerNames = new ConcurrentHashMap<>();
+    private Thread onlineTickThread;
+    private volatile boolean onlineTickRunning = false;
+    private volatile String netBanner = null;          // thông báo khi mất kết nối
+    // Công tắc để demo/đo: F3 HUD, F6 dự đoán, F7 nội suy, F8 độ trễ nội suy
+    private volatile boolean showNetHud = true;
+    private volatile boolean usePrediction = true;
+    private volatile boolean useInterpolation = true;
+    private volatile int interpDelayMs = 100;
 
-    // Trạng thái phím điều khiển
-    private boolean left = false, right = false, up = false, down = false;
+    // Trạng thái phím điều khiển (volatile: ghi từ luồng giao diện, đọc từ luồng game/mạng)
+    private volatile boolean left = false, right = false, up = false, down = false;
 
     // Map Manager
     private final MapManager mapManager;
@@ -77,6 +90,7 @@ public class ClientApp extends JFrame {
         mapManager.loadTilesetImage(mapPath + "/tileset.png", Common.ORIGINAL_TILE_SIZE);
         mapManager.loadTilesetProperties(mapPath + "/tileset.tsx");
         mapManager.loadAllChunks(mapPath, Common.MAX_CHUNK_X, Common.MAX_CHUNK_Y);
+        prediction = new ClientPrediction(mapManager);
 
         // 2. Nạp assets (Sprite nhân vật với Map<Direction, Image[]>)
         loadAssets();
@@ -97,6 +111,7 @@ public class ClientApp extends JFrame {
         // 4. Lắng nghe phím bấm — Key Bindings chuẩn Swing để tránh mất focus
         //    Dùng WHEN_IN_FOCUSED_WINDOW: nhận phím khi bất kỳ component nào trong cửa sổ có focus
         setupKeyBindings();
+        setupDebugKeys();
 
         // Xử lý đóng cửa sổ an toàn
         addWindowListener(new WindowAdapter() {
@@ -193,7 +208,7 @@ public class ClientApp extends JFrame {
 
             String nameInput = JOptionPane.showInputDialog(this, "Nhập Tên người chơi:", myName);
             if (nameInput != null && !nameInput.trim().isEmpty()) {
-                myName = nameInput.trim();
+                myName = Protocol.sanitizeName(nameInput, myName);
             }
 
             connectToServer(host.trim());
@@ -279,18 +294,13 @@ public class ClientApp extends JFrame {
         btnPanel.add(btnJoin);
         panel.add(btnPanel, BorderLayout.SOUTH);
 
-        btnRefresh.addActionListener(e -> { 
-            if (out != null) out.println(Common.CMD_ROOM_LIST); 
-        });
+        btnRefresh.addActionListener(e -> netSend(Common.CMD_ROOM_LIST));
 
         btnCreate.addActionListener(e -> {
             String rName = JOptionPane.showInputDialog(this, "Nhập tên phòng:");
-            if (rName != null && !rName.trim().isEmpty()) {
-                if (out != null) {
-                    out.println(Common.CMD_CREATE_ROOM + ":" + rName.trim() + ":" + myName);
-                    cardLayout.show(mainContainer, "GAME");
-                    gamePanel.requestFocusInWindow();
-                }
+            if (rName != null && !Protocol.sanitizeRoom(rName).isEmpty()) {
+                // Chỉ chuyển sang màn game khi server trả JOINED (xem handleServerMessage)
+                netSend(Common.CMD_CREATE_ROOM + ":" + Protocol.sanitizeRoom(rName) + ":" + myName);
             }
         });
 
@@ -298,11 +308,7 @@ public class ClientApp extends JFrame {
             String selected = roomJList.getSelectedValue();
             if (selected != null) {
                 String rName = selected.split(" ")[0];
-                if (out != null) {
-                    out.println(Common.CMD_JOIN_ROOM + ":" + rName + ":" + myName);
-                    cardLayout.show(mainContainer, "GAME");
-                    gamePanel.requestFocusInWindow();
-                }
+                netSend(Common.CMD_JOIN_ROOM + ":" + rName + ":" + myName);
             } else {
                 JOptionPane.showMessageDialog(this, "Vui lòng chọn 1 phòng trong danh sách!");
             }
@@ -401,7 +407,7 @@ public class ClientApp extends JFrame {
     }
 
     /**
-     * Kết nối mạng tới Server Online
+     * Kết nối mạng tới Server Online (chạy ở luồng riêng để không treo giao diện khi IP sai).
      */
     private void connectToServer(String host) {
         stopLocalGame();
@@ -410,69 +416,266 @@ public class ClientApp extends JFrame {
         isOfflineMode = false;
         setTitle("Dungeon Co-op Game [ONLINE - " + host + "]");
 
-        try {
-            socket = new Socket(host, Common.PORT);
-            out = new PrintWriter(socket.getOutputStream(), true);
-            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+        final NetClient nc = new NetClient(host, Common.PORT, new NetClient.Listener() {
+            @Override public void onMessage(String line) { handleServerMessage(line); }
 
-            netListenThread = new Thread(() -> {
-                try {
-                    String line;
-                    while ((line = in.readLine()) != null) {
-                        if (line.startsWith(Common.CMD_ROOM_LIST)) {
-                            String[] items = line.split(";");
-                            SwingUtilities.invokeLater(() -> {
-                                roomListModel.clear();
-                                for (int i = 1; i < items.length; i++) {
-                                    roomListModel.addElement(items[i]);
-                                }
-                            });
-                        } else if (line.startsWith(Common.CMD_STATE)) {
-                            String[] items = line.split(";");
-                            renderPlayers.clear();
-                            for (int i = 1; i < items.length; i++) {
-                                String[] pData = items[i].split(",");
-                                if (pData.length >= 6) {
-                                    renderPlayers.put(pData[0], new RenderPlayer(
-                                        pData[1], 
-                                        Integer.parseInt(pData[2]), 
-                                        Integer.parseInt(pData[3]), 
-                                        pData[4], 
-                                        Integer.parseInt(pData[5])
-                                    ));
-                                }
-                            }
-                            gamePanel.repaint();
-                        } else if (line.startsWith(Common.CMD_ERROR)) {
-                            String errorMsg = line.split(":")[1];
-                            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, errorMsg));
-                        }
-                    }
-                } catch (Exception ignored) {
-                } finally {
+            @Override public void onStateChanged(NetClient.State s, String info) {
+                netBanner = (s == NetClient.State.RECONNECTING)
+                        ? "Mất kết nối - đang kết nối lại (" + info + ")..." : null;
+                gamePanel.repaint();
+            }
+
+            @Override public void onSessionLost(String reason) {
+                SwingUtilities.invokeLater(() -> {
+                    if (net == null) return; // người dùng đã tự thoát trước đó
                     disconnectNetwork();
-                }
-            }, "Client-Net-Listen-Thread");
+                    JOptionPane.showMessageDialog(ClientApp.this, reason);
+                    setTitle("Dungeon Co-op Game");
+                    cardLayout.show(mainContainer, "MENU");
+                });
+            }
+        });
+        net = nc;
 
-            netListenThread.start();
-            out.println(Common.CMD_ROOM_LIST);
-            cardLayout.show(mainContainer, "LOBBY");
+        new Thread(() -> {
+            try {
+                nc.connect();
+                SwingUtilities.invokeLater(() -> {
+                    if (net == nc) cardLayout.show(mainContainer, "LOBBY");
+                });
+            } catch (IOException ex) {
+                SwingUtilities.invokeLater(() -> {
+                    if (net == nc) net = null;
+                    JOptionPane.showMessageDialog(ClientApp.this, "Không thể kết nối tới Server: " + ex.getMessage());
+                    cardLayout.show(mainContainer, "MENU");
+                });
+            }
+        }, "Net-Connect").start();
+    }
 
-        } catch (IOException ex) {
-            JOptionPane.showMessageDialog(this, "Không thể kết nối tới Server: " + ex.getMessage());
-            cardLayout.show(mainContainer, "MENU");
-        }
+    private void netSend(String msg) {
+        NetClient nc = net;
+        if (nc != null) nc.send(msg);
     }
 
     private void disconnectNetwork() {
-        try {
-            if (socket != null && !socket.isClosed()) socket.close();
-            if (out != null) out.close();
-            if (in != null) in.close();
-        } catch (IOException ignored) {}
-        socket = null;
-        out = null;
-        in = null;
+        stopOnlineTick();
+        NetClient nc = net;
+        net = null;
+        if (nc != null) nc.close();
+        renderPlayers.clear();
+        playerNames.clear();
+        interp.clear();
+        netBanner = null;
+    }
+
+    /** Xử lý một dòng từ server (chạy trên luồng mạng). */
+    private void handleServerMessage(String line) {
+        if (line.startsWith(Common.CMD_ROOM_LIST)) {
+            String[] items = line.split(";");
+            SwingUtilities.invokeLater(() -> {
+                roomListModel.clear();
+                for (int i = 1; i < items.length; i++) roomListModel.addElement(items[i]);
+            });
+        } else if (line.startsWith(Common.CMD_STATE)) {
+            handleState(line);
+        } else if (line.startsWith(Common.CMD_WELCOME + ":")) {
+            String[] p = line.split(":");
+            if (p.length >= 2) myId = p[1];
+        } else if (line.startsWith(Common.CMD_JOINED + ":")) {
+            // Reset trạng thái đồng bộ rồi mới vào màn hình game
+            prediction.resync();
+            interp.clear();
+            playerNames.clear();
+            renderPlayers.clear();
+            startOnlineTick();
+            SwingUtilities.invokeLater(() -> {
+                cardLayout.show(mainContainer, "GAME");
+                gamePanel.requestFocusInWindow();
+            });
+        } else if (line.startsWith(Common.CMD_RESUMED + ":")) {
+            prediction.resync(); // kết nối lại xong: lấy lại vị trí theo server
+        } else if (line.startsWith(Common.CMD_ERROR)) {
+            int i = line.indexOf(':');
+            String errorMsg = i >= 0 ? line.substring(i + 1) : "Lỗi";
+            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, errorMsg));
+        }
+    }
+
+    /** STATE;id,tên,x,y,hướng,frame,ack;... */
+    private void handleState(String line) {
+        long now = System.nanoTime();
+        String[] items = line.split(";");
+        Set<String> present = new HashSet<>();
+        for (int i = 1; i < items.length; i++) {
+            String[] f = items[i].split(",");
+            if (f.length < 6) continue;
+            try {
+                String id = f[0];
+                float x = Float.parseFloat(f[2]);
+                float y = Float.parseFloat(f[3]);
+                int sprite = Integer.parseInt(f[5]);
+                present.add(id);
+                playerNames.put(id, f[1]);
+                interp.add(id, now, x, y, f[4], sprite);
+                if (id.equals(myId) && f.length >= 7) {
+                    prediction.onServerState(x, y, Integer.parseInt(f[6]));
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+        interp.retainOnly(present);
+        playerNames.keySet().retainAll(present);
+    }
+
+    // ------------------------------------------------------------------ vòng lặp online (60 Hz)
+
+    /**
+     * Mỗi tick: (1) chạy dự đoán + gửi INPUT kèm seq, (2) dựng danh sách người chơi để vẽ
+     * (mình = vị trí dự đoán, người khác = nội suy), (3) vẽ lại.
+     */
+    private synchronized void startOnlineTick() {
+        stopOnlineTick();
+        onlineTickRunning = true;
+        onlineTickThread = new Thread(() -> {
+            long next = System.nanoTime();
+            while (onlineTickRunning) {
+                int n = 0;
+                while (System.nanoTime() >= next && n < 5) {
+                    onlineStep();
+                    next += Common.TICK_NS;
+                    n++;
+                }
+                if (n == 5) next = System.nanoTime();
+                renderOnline();
+                gamePanel.repaint();
+                long sleepNs = next - System.nanoTime();
+                if (sleepNs > 0) {
+                    try {
+                        Thread.sleep(sleepNs / 1_000_000L, (int) (sleepNs % 1_000_000L));
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                }
+            }
+        }, "Online-Tick-Thread");
+        onlineTickThread.setDaemon(true);
+        onlineTickThread.start();
+    }
+
+    private synchronized void stopOnlineTick() {
+        onlineTickRunning = false;
+        if (onlineTickThread != null) {
+            onlineTickThread.interrupt();
+            onlineTickThread = null;
+        }
+    }
+
+    private void onlineStep() {
+        NetClient nc = net;
+        if (nc == null || nc.getState() != NetClient.State.CONNECTED) return; // đang rớt mạng: tạm dừng
+        ClientPrediction.Input in = prediction.step(left, right, up, down);
+        nc.send(Common.CMD_INPUT + ":" + in.left + ":" + in.right + ":" + in.up + ":" + in.down + ":" + in.seq);
+    }
+
+    private void renderOnline() {
+        long renderTime = System.nanoTime() - interpDelayMs * 1_000_000L;
+        for (Map.Entry<String, String> e : playerNames.entrySet()) {
+            String id = e.getKey();
+            float x, y;
+            String dir;
+            int sprite;
+            if (id.equals(myId) && usePrediction) {
+                x = prediction.x(); y = prediction.y();
+                dir = prediction.direction(); sprite = prediction.spriteNum();
+            } else {
+                SnapshotInterpolator.Snap s = useInterpolation ? interp.sample(id, renderTime) : interp.latest(id);
+                if (s == null) continue;
+                x = s.x; y = s.y; dir = s.dir; sprite = s.sprite;
+            }
+            RenderPlayer rp = new RenderPlayer(e.getValue(), Math.round(x), Math.round(y), dir, sprite);
+            rp.id = id;
+            renderPlayers.put(id, rp);
+        }
+        renderPlayers.keySet().retainAll(playerNames.keySet());
+    }
+
+    private boolean isSelf(RenderPlayer p) {
+        return p.id != null ? p.id.equals(myId) : p.name.equals(myName);
+    }
+
+    // ------------------------------------------------------------------ phím debug mạng
+
+    private void setupDebugKeys() {
+        bindDebugKey(KeyEvent.VK_F3, () -> showNetHud = !showNetHud);
+        bindDebugKey(KeyEvent.VK_F4, () -> { // vòng lặp độ trễ giả lập mỗi chiều
+            NetClient nc = net;
+            if (nc == null) return;
+            int[] steps = {0, 50, 100, 200, 400};
+            int idx = 0;
+            for (int i = 0; i < steps.length; i++) if (steps[i] == nc.getLagMs()) idx = i;
+            nc.setLagMs(steps[(idx + 1) % steps.length]);
+        });
+        bindDebugKey(KeyEvent.VK_F6, () -> usePrediction = !usePrediction);
+        bindDebugKey(KeyEvent.VK_F7, () -> useInterpolation = !useInterpolation);
+        bindDebugKey(KeyEvent.VK_F8, () -> {
+            int[] steps = {50, 100, 150, 250};
+            int idx = 0;
+            for (int i = 0; i < steps.length; i++) if (steps[i] == interpDelayMs) idx = i;
+            interpDelayMs = steps[(idx + 1) % steps.length];
+        });
+        bindDebugKey(KeyEvent.VK_F9, () -> { // giả lập rớt mạng để demo tự kết nối lại
+            NetClient nc = net;
+            if (nc != null) nc.simulateConnectionDrop();
+        });
+    }
+
+    private void bindDebugKey(int keyCode, Runnable action) {
+        String name = "dbg_" + keyCode;
+        gamePanel.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(KeyStroke.getKeyStroke(keyCode, 0, false), name);
+        gamePanel.getActionMap().put(name, new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                action.run();
+                gamePanel.repaint();
+            }
+        });
+    }
+
+    /** HUD mạng (F3) + biểu ngữ khi mất kết nối. Chỉ vẽ ở chế độ Online. */
+    private void drawNetHud(Graphics2D g2, int w, int h) {
+        NetClient nc = net;
+        if (isOfflineMode || nc == null) return;
+
+        if (showNetHud) {
+            double rtt = nc.getRttMs();
+            String[] lines = {
+                String.format("PING %s ms (jitter %.1f)   STATE %.0f/s   down %.1f KB/s   up %.1f KB/s",
+                        rtt < 0 ? "--" : String.format("%.0f", rtt), nc.getJitterMs(),
+                        nc.getStatePerSec(), nc.getKbpsIn(), nc.getKbpsOut()),
+                "Dự đoán [F6]: " + (usePrediction ? "BẬT" : "TẮT")
+                        + "   Nội suy [F7]: " + (useInterpolation ? "BẬT" : "TẮT") + " (" + interpDelayMs + " ms, F8)"
+                        + "   Lag giả lập [F4]: " + nc.getLagMs() + " ms/chiều",
+                String.format("Sai số reconcile: %.2f px (max %.2f)   pending: %d   hiệu chỉnh: %d   kết nối lại: %d   [F9] rớt mạng   [F3] ẩn HUD",
+                        prediction.lastError(), prediction.maxError(), prediction.pendingCount(),
+                        prediction.correctionCount(), nc.getReconnectCount())
+            };
+            g2.setFont(new Font("Arial", Font.PLAIN, 12));
+            int bw = 0;
+            for (String l : lines) bw = Math.max(bw, g2.getFontMetrics().stringWidth(l));
+            g2.setColor(new Color(0, 0, 0, 150));
+            g2.fillRect(6, 6, bw + 14, lines.length * 16 + 8);
+            g2.setColor(new Color(120, 255, 140));
+            for (int i = 0; i < lines.length; i++) g2.drawString(lines[i], 13, 22 + i * 16);
+        }
+
+        String banner = netBanner;
+        if (banner != null) {
+            g2.setColor(new Color(0, 0, 0, 170));
+            g2.fillRect(0, 0, w, h);
+            g2.setFont(new Font("Arial", Font.BOLD, 26));
+            g2.setColor(new Color(255, 200, 80));
+            int tw = g2.getFontMetrics().stringWidth(banner);
+            g2.drawString(banner, (w - tw) / 2, h / 2);
+        }
     }
 
     private void handleEscapeKey() {
@@ -548,9 +751,7 @@ public class ClientApp extends JFrame {
             case "up":    up    = isPressed; break;
             case "down":  down  = isPressed; break;
         }
-        if (!isOfflineMode && out != null) {
-            out.println(Common.CMD_INPUT + ":" + left + ":" + right + ":" + up + ":" + down);
-        }
+        // INPUT được gửi theo tick cố định (onlineStep), không gửi theo sự kiện phím nữa.
     }
 
     private void updateKey(int keyCode, boolean isPressed) {
@@ -558,11 +759,6 @@ public class ClientApp extends JFrame {
         if (keyCode == KeyEvent.VK_D || keyCode == KeyEvent.VK_RIGHT) right = isPressed;
         if (keyCode == KeyEvent.VK_W || keyCode == KeyEvent.VK_UP)    up    = isPressed;
         if (keyCode == KeyEvent.VK_S || keyCode == KeyEvent.VK_DOWN)  down  = isPressed;
-
-        if (!isOfflineMode && out != null) {
-            // Gửi dữ liệu điều khiển lên Server khi ở chế độ Online
-            out.println(Common.CMD_INPUT + ":" + left + ":" + right + ":" + up + ":" + down);
-        }
     }
 
     private class GamePanel extends JPanel {
@@ -579,7 +775,7 @@ public class ClientApp extends JFrame {
             int myY = (int) Common.SPAWN_Y;
 
             for (RenderPlayer p : renderPlayers.values()) {
-                if (p.name.equals(myName)) {
+                if (isSelf(p)) {
                     myX = p.x;
                     myY = p.y;
                     break;
@@ -620,7 +816,7 @@ public class ClientApp extends JFrame {
                 if (currentSprite != null) {
                     g2.drawImage(currentSprite, screenX, screenY, playerRenderSize, playerRenderSize, null);
                 } else {
-                    g2.setColor(p.name.equals(myName) ? Color.CYAN : Color.GREEN);
+                    g2.setColor(isSelf(p) ? Color.CYAN : Color.GREEN);
                     g2.fillRect(screenX, screenY, playerRenderSize, playerRenderSize);
                 }
 
@@ -628,10 +824,18 @@ public class ClientApp extends JFrame {
                 g2.setFont(new Font("Arial", Font.PLAIN, 12));
                 g2.drawString(p.name, screenX - 5, screenY - 5);
             }
+
+            drawNetHud(g2, getWidth(), getHeight());
         }
     }
 
     public static void main(String[] args) {
+        // Tham số dev: --lag=<ms> giả lập độ trễ mỗi chiều (để demo prediction/interpolation)
+        if (args != null) {
+            for (String a : args) {
+                if (a.startsWith("--lag=")) System.setProperty("net.lag", a.substring(6));
+            }
+        }
         SwingUtilities.invokeLater(() -> {
             ClientApp app = new ClientApp();
             app.setVisible(true);
