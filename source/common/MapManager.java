@@ -28,6 +28,7 @@ public class MapManager {
     private Tile[] tiles;
     private final int chunkSize = Common.CHUNK_SIZE;
     private final Map<String, Chunk> loadedChunks = new HashMap<>();
+    private final Set<Integer> collisionTileIds = new HashSet<>();
 
     public MapManager() {}
 
@@ -52,6 +53,7 @@ public class MapManager {
                 for (int x = 0; x < cols; x++) {
                     tiles[idx] = new Tile();
                     tiles[idx].image = tileset.getSubimage(x * originalTileSize, y * originalTileSize, originalTileSize, originalTileSize);
+                    tiles[idx].collision = collisionTileIds.contains(idx);
                     idx++;
                 }
             }
@@ -92,6 +94,7 @@ public class MapManager {
 
                     // Kiểm tra xem tile này có thuộc tính collision true hay không
                     if (block.contains("name=\"collision\"") && (block.contains("value=\"true\"") || block.contains("value=\"1\""))) {
+                        collisionTileIds.add(tileId);
                         if (tiles != null && tileId >= 0 && tileId < tiles.length) {
                             tiles[tileId].collision = true;
                             System.out.println("[MapManager] Set Collision TRUE cho Tile ID: " + tileId);
@@ -175,9 +178,10 @@ public class MapManager {
 
         String key = chunkX + "_" + chunkY;
         Chunk c = loadedChunks.get(key);
-        if (c == null) return false;
+        if (c == null) return true;
 
         int tileNum = c.mapTileNum[inChunkRow][inChunkCol];
+        if (collisionTileIds.contains(tileNum)) return true;
         if (tiles != null && tileNum >= 0 && tileNum < tiles.length) {
             return tiles[tileNum].collision;
         }

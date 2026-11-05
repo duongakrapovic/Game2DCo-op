@@ -26,7 +26,8 @@ public class Enemy {
         if (target == null) return;
         float attackDx = target.x - x;
         float attackDy = target.y - y;
-        if (attackDx * attackDx + attackDy * attackDy <= 40f * 40f) {
+        if (attackDx * attackDx + attackDy * attackDy <= 40f * 40f
+                && hasLineOfSight(target, map)) {
             long now = System.currentTimeMillis();
             if (now >= nextAttackAt) {
                 target.health = Math.max(0, target.health - ("E_MONSTER".equals(id) ? 15 : 10));
@@ -68,11 +69,34 @@ public class Enemy {
     private void moveWithCollision(float dx, float dy, MapManager map) {
         int size = hitboxSize();
         float nextX = x + dx;
-        if (!map.isCollisionAtWorld((int) nextX + 3, (int) y + 3)
-                && !map.isCollisionAtWorld((int) nextX + size - 3, (int) y + size - 3)) x = nextX;
+        if (!isBlocked(nextX, y, size, map)) x = nextX;
         float nextY = y + dy;
-        if (!map.isCollisionAtWorld((int) x + 3, (int) nextY + 3)
-                && !map.isCollisionAtWorld((int) x + size - 3, (int) nextY + size - 3)) y = nextY;
+        if (!isBlocked(x, nextY, size, map)) y = nextY;
+    }
+
+    private boolean isBlocked(float candidateX, float candidateY, int size, MapManager map) {
+        int left = (int) candidateX + 3;
+        int right = (int) candidateX + size - 3;
+        int top = (int) candidateY + 3;
+        int bottom = (int) candidateY + size - 3;
+        return map.isCollisionAtWorld(left, top) || map.isCollisionAtWorld(right, top)
+                || map.isCollisionAtWorld(left, bottom) || map.isCollisionAtWorld(right, bottom);
+    }
+
+    private boolean hasLineOfSight(Player target, MapManager map) {
+        float fromX = x + hitboxSize() / 2f;
+        float fromY = y + hitboxSize() / 2f;
+        float toX = target.x + hitboxSize() / 2f;
+        float toY = target.y + hitboxSize() / 2f;
+        float dx = toX - fromX;
+        float dy = toY - fromY;
+        int samples = Math.max(1, (int) (Math.sqrt(dx * dx + dy * dy) / 8f));
+        for (int i = 1; i < samples; i++) {
+            int sampleX = (int) (fromX + dx * i / samples);
+            int sampleY = (int) (fromY + dy * i / samples);
+            if (map.isCollisionAtWorld(sampleX, sampleY)) return false;
+        }
+        return true;
     }
 
     private int hitboxSize() { return (int) (16 * Common.SCALE); }
