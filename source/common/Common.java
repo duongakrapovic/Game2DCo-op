@@ -25,4 +25,21 @@ public class Common {
     public static final String CMD_INPUT       = "INPUT";
     public static final String CMD_STATE       = "STATE";
     public static final String CMD_ERROR       = "ERROR";
+
+    // --- Protocol v2 (phần mạng) ---
+    public static final String CMD_LEAVE_ROOM  = "LEAVE_ROOM"; // C->S: rời phòng
+    public static final String CMD_PING        = "PING";       // C->S: PING:<nanoTime>
+    public static final String CMD_PONG        = "PONG";       // S->C: PONG:<nanoTime> (echo)
+    public static final String CMD_WELCOME     = "WELCOME";    // S->C: WELCOME:<id>:<token>
+    public static final String CMD_JOINED      = "JOINED";     // S->C: JOINED:<tênPhòng>
+    public static final String CMD_LEFT        = "LEFT";       // S->C: đã rời phòng
+    public static final String CMD_RESUME      = "RESUME";     // C->S: RESUME:<token> (vào lại sau khi rớt mạng)
+    public static final String CMD_RESUMED     = "RESUMED";    // S->C: RESUMED:<tênPhòng>
+    public static final String CMD_RESUME_FAIL = "RESUME_FAIL";// S->C: phiên hết hạn / không tồn tại
+
+    // Tick cố định của server (và của client khi dự đoán) — phải giống nhau để reconcile chính xác
+    public static final int  TICK_RATE = 60;
+    public static final long TICK_NS   = 1_000_000_000L / TICK_RATE;
+
+    public static final int MAX_PLAYERS_PER_ROOM = 4;
 }

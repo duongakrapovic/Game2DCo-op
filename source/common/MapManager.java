@@ -26,6 +26,9 @@ public class MapManager {
     }
 
     private Tile[] tiles;
+    // Tập id tile có collision. Độc lập với việc có nạp ảnh hay không
+    // (server không nạp ảnh nhưng vẫn cần biết tường ở đâu).
+    private final Set<Integer> collisionTiles = new HashSet<>();
     private final int chunkSize = Common.CHUNK_SIZE;
     private final Map<String, Chunk> loadedChunks = new HashMap<>();
 
@@ -92,9 +95,9 @@ public class MapManager {
 
                     // Kiểm tra xem tile này có thuộc tính collision true hay không
                     if (block.contains("name=\"collision\"") && (block.contains("value=\"true\"") || block.contains("value=\"1\""))) {
+                        collisionTiles.add(tileId);
                         if (tiles != null && tileId >= 0 && tileId < tiles.length) {
                             tiles[tileId].collision = true;
-                            System.out.println("[MapManager] Set Collision TRUE cho Tile ID: " + tileId);
                         }
                     }
                 }
@@ -173,15 +176,15 @@ public class MapManager {
         int inChunkCol = tileCol % chunkSize;
         int inChunkRow = tileRow % chunkSize;
 
+        // Ngoài rìa phải/dưới của bản đồ cũng là vật cản (trước đây cho đi xuyên ra ngoài map)
+        if (chunkX >= Common.MAX_CHUNK_X || chunkY >= Common.MAX_CHUNK_Y) return true;
+
         String key = chunkX + "_" + chunkY;
         Chunk c = loadedChunks.get(key);
         if (c == null) return false;
 
         int tileNum = c.mapTileNum[inChunkRow][inChunkCol];
-        if (tiles != null && tileNum >= 0 && tileNum < tiles.length) {
-            return tiles[tileNum].collision;
-        }
-        return false;
+        return tileNum >= 0 && collisionTiles.contains(tileNum);
     }
 
     // Tô viền ngoài màu đen
