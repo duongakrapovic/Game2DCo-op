@@ -72,14 +72,16 @@ source/server/
 | Lấy phòng | `ROOM_LIST` |
 | Tạo phòng | `CREATE_ROOM:<tênPhòng>:<tênNgườiChơi>` |
 | Vào phòng | `JOIN_ROOM:<tênPhòng>:<tênNgườiChơi>` |
-| Input phím | `INPUT:<left>:<right>:<up>:<down>` |
+| Input phím | `INPUT:<left>:<right>:<up>:<down>:<attack>` |
 
 ### Gửi về Client
 | Lệnh | Định dạng |
 |------|-----------|
 | Danh sách phòng | `ROOM_LIST;<tên> (N người);...` |
-| Trạng thái game | `STATE;<id>,<tên>,<x>,<y>;...` |
+| Trạng thái game | `STATE;<id>,<name>,<x>,<y>,<direction>,<frame>,<hp>,<maxHp>;...` |
 | Lỗi | `ERROR:<thôngBáo>` |
+| Người chơi nhận sát thương | `PLAYER_DAMAGE:<playerId>:<damage>:<currentHp>` |
+| Quái nhận sát thương | `ENEMY_DAMAGE:<enemyId>:<damage>:<currentHp>` |
 
 ---
 

@@ -77,6 +77,7 @@ public class ServerApp {
                             p.right = Boolean.parseBoolean(parts[2]);
                             p.up    = Boolean.parseBoolean(parts[3]);
                             p.down  = Boolean.parseBoolean(parts[4]);
+                            p.attack = parts.length >= 6 && Boolean.parseBoolean(parts[5]);
                         }
                     } else if (cmd.equals(Common.CMD_ROOM_LIST)) {
                         sendRoomList(out);

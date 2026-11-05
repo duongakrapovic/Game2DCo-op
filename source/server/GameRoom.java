@@ -50,10 +50,14 @@ public class GameRoom implements Runnable {
     public void run() {
         while (isRunning) {
             for (Player p : players.values()) {
+                p.updateLife(System.currentTimeMillis());
                 // Tính toán vật lý & va chạm tilemap cho từng người chơi
-                PhysicsEngine.updatePlayer(p, mapManager);
+                if (p.isAlive()) PhysicsEngine.updatePlayer(p, mapManager);
             }
             enemyManager.update(players.values(), mapManager, 1.0f / 60.0f);
+            for (EnemyManager.DamageEvent event : enemyManager.drainDamageEvents()) {
+                broadcast(event.toProtocolLine());
+            }
             broadcastState();
             try {
                 Thread.sleep(16); // 60 FPS Game Loop
@@ -72,16 +76,22 @@ public class GameRoom implements Runnable {
           .append((int) p.y).append(",")
           .append(p.direction).append(",")
           .append(p.spriteNum).append(",")
-          .append(p.health);
+          .append(p.health).append(",")
+          .append(Player.MAX_HEALTH);
     }
     for (Enemy e : enemyManager.getEnemies()) {
         sb.append(";").append(e.id).append(",")
           .append(e.name).append(",")
           .append((int) e.x).append(",")
           .append((int) e.y).append(",")
-          .append(e.direction).append(",1,100");
+          .append(e.direction).append(",1,")
+          .append(e.health).append(",")
+          .append(Enemy.MAX_HEALTH);
     }
-    String msg = sb.toString();
+    broadcast(sb.toString());
+}
+
+private void broadcast(String msg) {
     for (PrintWriter out : writers.values()) {
         out.println(msg);
     }

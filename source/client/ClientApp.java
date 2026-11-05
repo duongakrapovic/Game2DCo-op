@@ -22,11 +22,13 @@ public class ClientApp extends JFrame {
     // Lớp chứa dữ liệu đồng bộ để hiển thị Player lên màn hình
     public static class RenderPlayer {
         public String name;
-        public int x, y;
-        public String direction = "down"; // "up", "down", "left", "right"
-        public int spriteNum = 1;        // 1 hoặc 2
-        public boolean enemy;
-        public int health = 100;
+        public volatile int x, y;
+        public volatile String direction = "down"; // "up", "down", "left", "right"
+        public volatile int spriteNum = 1;        // 1 hoặc 2
+        public final boolean enemy;
+        public volatile int health = 100;
+        public volatile int maxHealth = 100;
+        public volatile long flashUntil;
 
         public RenderPlayer(String name, int x, int y, String direction, int spriteNum) {
             this(name, x, y, direction, spriteNum, false);
@@ -37,13 +39,20 @@ public class ClientApp extends JFrame {
         }
 
         public RenderPlayer(String name, int x, int y, String direction, int spriteNum, boolean enemy, int health) {
+            this(name, x, y, direction, spriteNum, enemy, health, 100, 0);
+        }
+
+        public RenderPlayer(String name, int x, int y, String direction, int spriteNum,
+                            boolean enemy, int health, int maxHealth, long flashUntil) {
             this.name = name;
             this.x = x;
             this.y = y;
             this.direction = direction;
             this.spriteNum = spriteNum;
             this.enemy = enemy;
-            this.health = Math.max(0, Math.min(100, health));
+            this.maxHealth = Math.max(1, maxHealth);
+            this.health = Math.max(0, Math.min(this.maxHealth, health));
+            this.flashUntil = flashUntil;
         }
     }
 
@@ -52,6 +61,7 @@ public class ClientApp extends JFrame {
 
     // Danh sách người chơi hiển thị (Thread-safe)
     private final Map<String, RenderPlayer> renderPlayers = new ConcurrentHashMap<>();
+    private final Map<String, Long> hitFlashUntil = new ConcurrentHashMap<>();
     private String myName = "Player_" + (int) (Math.random() * 100);
 
     // Network I/O
@@ -61,7 +71,7 @@ public class ClientApp extends JFrame {
     private Thread netListenThread;
 
     // Trạng thái phím điều khiển
-    private boolean left = false, right = false, up = false, down = false;
+    private volatile boolean left = false, right = false, up = false, down = false, attack = false;
 
     // Map Manager
     private final MapManager mapManager;
@@ -369,10 +379,13 @@ public class ClientApp extends JFrame {
                 localPlayer.right = right;
                 localPlayer.up    = up;
                 localPlayer.down  = down;
+                localPlayer.attack = attack;
 
                 // 2. Tính toán vật lý và animation bước chân qua PhysicsEngine trong common
-                PhysicsEngine.updatePlayer(localPlayer, mapManager, dt);
+                localPlayer.updateLife(System.currentTimeMillis());
+                if (localPlayer.isAlive()) PhysicsEngine.updatePlayer(localPlayer, mapManager, dt);
                 localEnemyManager.update(java.util.Collections.singletonList(localPlayer), mapManager, dt);
+                localEnemyManager.drainDamageEvents();
 
                 // 3. Cập nhật trạng thái hiển thị
                 renderPlayers.put("LOCAL_1", new RenderPlayer(
@@ -382,11 +395,13 @@ public class ClientApp extends JFrame {
                     localPlayer.direction, 
                     localPlayer.spriteNum,
                     false,
-                    localPlayer.health
+                    localPlayer.health,
+                    Player.MAX_HEALTH,
+                    localPlayer.flashUntil
                 ));
                 for (Enemy enemy : localEnemyManager.getEnemies()) {
                     renderPlayers.put(enemy.id, new RenderPlayer(enemy.name, (int) enemy.x, (int) enemy.y,
-                            enemy.direction, 1, true));
+                            enemy.direction, 1, true, enemy.health, Enemy.MAX_HEALTH, enemy.flashUntil));
                 }
 
                 // 4. Yêu cầu vẽ lại trên Event Dispatch Thread
@@ -465,11 +480,28 @@ public class ClientApp extends JFrame {
                                         pData[4], 
                                         Integer.parseInt(pData[5]),
                                         pData[0].startsWith("E_"),
-                                        pData.length >= 7 ? Integer.parseInt(pData[6]) : 100
+                                        pData.length >= 7 ? Integer.parseInt(pData[6]) : 100,
+                                        pData.length >= 8 ? Integer.parseInt(pData[7]) : 100,
+                                        hitFlashUntil.getOrDefault(pData[0], 0L)
                                     ));
                                 }
                             }
                             gamePanel.repaint();
+                        } else if (line.startsWith(Common.CMD_PLAYER_DAMAGE + ":")
+                                || line.startsWith(Common.CMD_ENEMY_DAMAGE + ":")) {
+                            String[] damage = line.split(":");
+                            if (damage.length >= 4) {
+                                String targetId = damage[1];
+                                int currentHealth = Integer.parseInt(damage[3]);
+                                long flashUntil = System.currentTimeMillis() + 150;
+                                hitFlashUntil.put(targetId, flashUntil);
+                                RenderPlayer target = renderPlayers.get(targetId);
+                                if (target != null) {
+                                    target.health = Math.max(0, Math.min(target.maxHealth, currentHealth));
+                                    target.flashUntil = flashUntil;
+                                }
+                                gamePanel.repaint();
+                            }
                         } else if (line.startsWith(Common.CMD_ERROR)) {
                             String errorMsg = line.split(":")[1];
                             SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, errorMsg));
@@ -527,9 +559,10 @@ public class ClientApp extends JFrame {
             {KeyEvent.VK_S,     KeyEvent.VK_DOWN},
             {KeyEvent.VK_A,     KeyEvent.VK_LEFT},
             {KeyEvent.VK_D,     KeyEvent.VK_RIGHT},
-            {KeyEvent.VK_ESCAPE, -1}
+            {KeyEvent.VK_ESCAPE, -1},
+            {KeyEvent.VK_J, -1}
         };
-        String[] names = {"up", "down", "left", "right", "esc"};
+        String[] names = {"up", "down", "left", "right", "esc", "attack"};
         int condition = JComponent.WHEN_IN_FOCUSED_WINDOW;
 
         for (int i = 0; i < names.length; i++) {
@@ -574,9 +607,10 @@ public class ClientApp extends JFrame {
             case "right": right = isPressed; break;
             case "up":    up    = isPressed; break;
             case "down":  down  = isPressed; break;
+            case "attack": attack = isPressed; break;
         }
         if (!isOfflineMode && out != null) {
-            out.println(Common.CMD_INPUT + ":" + left + ":" + right + ":" + up + ":" + down);
+            out.println(Common.CMD_INPUT + ":" + left + ":" + right + ":" + up + ":" + down + ":" + attack);
         }
     }
 
@@ -585,10 +619,11 @@ public class ClientApp extends JFrame {
         if (keyCode == KeyEvent.VK_D || keyCode == KeyEvent.VK_RIGHT) right = isPressed;
         if (keyCode == KeyEvent.VK_W || keyCode == KeyEvent.VK_UP)    up    = isPressed;
         if (keyCode == KeyEvent.VK_S || keyCode == KeyEvent.VK_DOWN)  down  = isPressed;
+        if (keyCode == KeyEvent.VK_J) attack = isPressed;
 
         if (!isOfflineMode && out != null) {
             // Gửi dữ liệu điều khiển lên Server khi ở chế độ Online
-            out.println(Common.CMD_INPUT + ":" + left + ":" + right + ":" + up + ":" + down);
+            out.println(Common.CMD_INPUT + ":" + left + ":" + right + ":" + up + ":" + down + ":" + attack);
         }
     }
 
@@ -604,13 +639,15 @@ public class ClientApp extends JFrame {
 
             int myX = (int) Common.SPAWN_X;
             int myY = (int) Common.SPAWN_Y;
-            int myHealth = 100;
+            int myHealth = Player.MAX_HEALTH;
+            int myMaxHealth = Player.MAX_HEALTH;
 
             for (RenderPlayer p : renderPlayers.values()) {
                 if (p.name.equals(myName)) {
                     myX = p.x;
                     myY = p.y;
                     myHealth = p.health;
+                    myMaxHealth = p.maxHealth;
                     break;
                 }
             }
@@ -649,9 +686,15 @@ public class ClientApp extends JFrame {
                 if (currentSprite != null) {
                     g2.drawImage(currentSprite, screenX, screenY, playerRenderSize, playerRenderSize, null);
                 } else if (p.enemy) {
-                    EnemyRenderer.draw(g2, p.name, screenX, screenY, playerRenderSize);
+                    EnemyRenderer.draw(g2, p.name, screenX, screenY, playerRenderSize,
+                            p.health, p.maxHealth, p.flashUntil);
                 } else {
                     g2.setColor(p.name.equals(myName) ? Color.CYAN : Color.GREEN);
+                    g2.fillRect(screenX, screenY, playerRenderSize, playerRenderSize);
+                }
+
+                if (!p.enemy && System.currentTimeMillis() < p.flashUntil) {
+                    g2.setColor(new Color(255, 25, 25, 145));
                     g2.fillRect(screenX, screenY, playerRenderSize, playerRenderSize);
                 }
 
@@ -661,15 +704,13 @@ public class ClientApp extends JFrame {
             }
 
             g2.setColor(new Color(0, 0, 0, 170));
-            g2.fillRoundRect(16, 16, 224, 38, 10, 10);
+            g2.fillRoundRect(16, 16, 236, 58, 10, 10);
             g2.setColor(Color.WHITE);
-            g2.drawString("HP", 26, 40);
+            g2.drawString("HP: " + myHealth + " / " + myMaxHealth, 26, 34);
             g2.setColor(Color.DARK_GRAY);
-            g2.fillRoundRect(54, 27, 174, 16, 8, 8);
-            g2.setColor(myHealth > 30 ? new Color(65, 200, 90) : new Color(225, 65, 55));
-            g2.fillRoundRect(54, 27, Math.max(0, 174 * myHealth / 100), 16, 8, 8);
-            g2.setColor(Color.WHITE);
-            g2.drawString(myHealth + "/100", 111, 40);
+            g2.fillRoundRect(26, 42, 216, 12, 8, 8);
+            g2.setColor(new Color(225, 65, 55));
+            g2.fillRoundRect(26, 42, Math.max(0, 216 * myHealth / myMaxHealth), 12, 8, 8);
         }
     }
 

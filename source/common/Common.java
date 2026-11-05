@@ -25,4 +25,6 @@ public class Common {
     public static final String CMD_INPUT       = "INPUT";
     public static final String CMD_STATE       = "STATE";
     public static final String CMD_ERROR       = "ERROR";
+    public static final String CMD_PLAYER_DAMAGE = "PLAYER_DAMAGE";
+    public static final String CMD_ENEMY_DAMAGE = "ENEMY_DAMAGE";
 }

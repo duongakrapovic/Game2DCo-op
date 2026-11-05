@@ -2,44 +2,63 @@ package source.common;
 
 /** Server/offline simulated enemy that follows the nearest player with A*. */
 public class Enemy {
+    public static final int MAX_HEALTH = 100;
+    public static final long ATTACK_COOLDOWN_MS = 1200;
+    public static final long HIT_FLASH_MS = 150;
+
     public final String id;
     public final String name;
     public final float speed;
+    public final float spawnX;
+    public final float spawnY;
     public float x;
     public float y;
+    public int health = MAX_HEALTH;
     public String direction = "down";
+    public long flashUntil;
 
     private long nextPathAt;
     private int[][] path = new int[0][2];
     private int pathIndex;
     private long nextAttackAt;
+    private long respawnAt;
 
     public Enemy(String id, String name, float x, float y, float speed) {
         this.id = id;
         this.name = name;
+        this.spawnX = x;
+        this.spawnY = y;
         this.x = x;
         this.y = y;
         this.speed = speed;
     }
 
     public void update(Player target, MapManager map, float dt) {
-        if (target == null) return;
+        long now = System.currentTimeMillis();
+        if (health == 0) {
+            if (now >= respawnAt) {
+                health = MAX_HEALTH;
+                x = spawnX;
+                y = spawnY;
+                nextPathAt = 0;
+            } else {
+                return;
+            }
+        }
+        if (target == null || !target.isAlive()) return;
         float attackDx = target.x - x;
         float attackDy = target.y - y;
-        if (attackDx * attackDx + attackDy * attackDy <= 40f * 40f
+        if (attackDx * attackDx + attackDy * attackDy <= 48f * 48f
                 && hasLineOfSight(target, map)) {
-            long now = System.currentTimeMillis();
             if (now >= nextAttackAt) {
-                target.health = Math.max(0, target.health - ("E_MONSTER".equals(id) ? 15 : 10));
-                nextAttackAt = now + 1000;
-                if (target.health == 0) target.respawnToHome();
+                target.takeDamage("E_MONSTER".equals(id) ? 15 : 10, x, y, map, now);
+                nextAttackAt = now + ATTACK_COOLDOWN_MS;
             }
         }
         int goalX = ((int) (target.x + Common.TILE_SIZE / 2)) / Common.TILE_SIZE;
         int goalY = ((int) (target.y + Common.TILE_SIZE / 2)) / Common.TILE_SIZE;
         int startX = ((int) (x + Common.TILE_SIZE / 2)) / Common.TILE_SIZE;
         int startY = ((int) (y + Common.TILE_SIZE / 2)) / Common.TILE_SIZE;
-        long now = System.currentTimeMillis();
         if (now >= nextPathAt) {
             path = findPath(startX, startY, goalX, goalY, map);
             pathIndex = 0;
@@ -64,6 +83,30 @@ public class Enemy {
             else direction = dy < 0 ? "up" : "down";
             moveWithCollision(moveX, moveY, map);
         }
+    }
+
+    public boolean takeDamage(int damage, float sourceX, float sourceY, MapManager map, long now) {
+        if (health <= 0) return false;
+        health = Math.max(0, health - Math.max(0, damage));
+        flashUntil = now + HIT_FLASH_MS;
+        applyKnockback(sourceX, sourceY, map);
+        if (health == 0) {
+            respawnAt = now + 2000;
+            path = new int[0][2];
+            pathIndex = 0;
+        }
+        return true;
+    }
+
+    private void applyKnockback(float sourceX, float sourceY, MapManager map) {
+        float dx = x - sourceX;
+        float dy = y - sourceY;
+        float length = (float) Math.sqrt(dx * dx + dy * dy);
+        if (length == 0) {
+            dx = 1f;
+            length = 1f;
+        }
+        moveWithCollision(dx / length * 12f, dy / length * 12f, map);
     }
 
     private void moveWithCollision(float dx, float dy, MapManager map) {

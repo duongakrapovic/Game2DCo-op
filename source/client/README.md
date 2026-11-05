@@ -77,6 +77,7 @@ source/client/
 | `S` / `↓` | Di chuyển xuống |
 | `A` / `←` | Di chuyển trái |
 | `D` / `→` | Di chuyển phải |
+| `J` | Tấn công quái |
 
 Di chuyển chéo (VD: `W + D`) tự động chuẩn hóa tốc độ (nhân `√2/2 ≈ 0.707`).
 

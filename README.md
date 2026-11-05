@@ -90,6 +90,7 @@ Khi khởi động, client hiển thị hộp thoại chọn chế độ:
 | `S` / `↓` | Di chuyển xuống |
 | `A` / `←` | Di chuyển trái |
 | `D` / `→` | Di chuyển phải |
+| `J` | Tấn công quái |
 
 ### 5. Chơi Online (nhiều người)
 1. Một người chạy `run-server.bat`
@@ -111,22 +112,24 @@ Giao thức TCP plain-text, mỗi lệnh là một dòng (`\n`), các trường 
 | Lấy danh sách phòng | `ROOM_LIST` | Yêu cầu server gửi danh sách phòng hiện tại |
 | Tạo phòng | `CREATE_ROOM:<tênPhòng>:<tênNgườiChơi>` | Tạo phòng mới và vào ngay |
 | Vào phòng | `JOIN_ROOM:<tênPhòng>:<tênNgườiChơi>` | Vào phòng đã có |
-| Gửi đầu vào | `INPUT:<left>:<right>:<up>:<down>` | Gửi trạng thái phím bấm (true/false) |
+| Gửi đầu vào | `INPUT:<left>:<right>:<up>:<down>:<attack>` | Gửi trạng thái phím bấm (true/false) |
 
 ### Server → Client
 
 | Lệnh | Định dạng | Mô tả |
 |------|-----------|-------|
 | Danh sách phòng | `ROOM_LIST;<phòng1> (N người);<phòng2>...` | Broadcast khi có thay đổi |
-| Trạng thái game | `STATE;<id1>,<tên1>,<x1>,<y1>;<id2>,...` | Broadcast 60 lần/giây |
+| Trạng thái game | `STATE;<id>,<name>,<x>,<y>,<direction>,<frame>,<hp>,<maxHp>;...` | Broadcast 60 lần/giây |
 | Lỗi | `ERROR:<thôngBáo>` | Phòng đã tồn tại / không tồn tại |
+| Người chơi nhận sát thương | `PLAYER_DAMAGE:<playerId>:<damage>:<currentHp>` | Phát khi người chơi bị đánh |
+| Quái nhận sát thương | `ENEMY_DAMAGE:<enemyId>:<damage>:<currentHp>` | Phát khi quái bị đánh |
 
 **Ví dụ luồng kết nối:**
 ```
 Server → Client : ROOM_LIST                          (gửi ngay khi client kết nối)
 Client → Server : CREATE_ROOM:DungeonA:Duc           (tạo phòng)
-Server → Client : STATE;P1,Duc,704,576               (loop 60FPS)
-Client → Server : INPUT:false:true:false:false       (bấm phím D - đi phải)
+Server → Client : STATE;P1,Duc,704,576,down,1,100,100 (loop 60FPS)
+Client → Server : INPUT:false:true:false:false:false (bấm phím D - đi phải)
 ```
 
 ---
