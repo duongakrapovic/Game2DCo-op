@@ -168,12 +168,6 @@ Server → Client : PONG:81234567890
 | 9 | **Log & thống kê** | `logs/game_state_*.csv` (10 Hz, cột như `statics/dataset_sample.csv`), `logs/net_stats.csv` (client, msg/s, KB/s mỗi 5 s) | `GameLogger`, `ServerStats` |
 | 10 | **Giả lập mạng xấu để demo** | Thêm độ trễ giả lập mỗi chiều, bật/tắt prediction và interpolation, giả lập rớt mạng ngay trong game | `NetClient`, phím F3–F9 |
 
-**Vì sao prediction cần thiết?** Với lag giả lập 100 ms mỗi chiều, nếu chỉ vẽ vị trí server thì nhân vật lệch so với vị trí
-đúng trung bình **82 px** (tối đa 168 px ≈ 5 ô). Khi bật prediction + reconciliation, sai số so với server là **0.000 px**
-(do client và server dùng chung `PhysicsEngine`/`MapManager` tất định). Bạn có thể tự kiểm chứng bằng `run-selftest.bat`.
-
-**Giao thức nền là TCP** (đúng nội dung môn học: socket, đa luồng). Hạn chế đã biết: TCP bị *head-of-line blocking* khi mất gói
-nên game thời gian thực thương mại thường dùng UDP; dự án bù lại bằng `TCP_NODELAY`, gộp snapshot cũ, prediction và interpolation.
 
 ---
 
