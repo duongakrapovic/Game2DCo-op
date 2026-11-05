@@ -9,8 +9,6 @@ public class Enemy {
     public float y;
     public String direction = "down";
 
-    private int targetTileX = Integer.MIN_VALUE;
-    private int targetTileY = Integer.MIN_VALUE;
     private long nextPathAt;
     private int[][] path = new int[0][2];
     private int pathIndex;
@@ -41,11 +39,9 @@ public class Enemy {
         int startX = ((int) (x + Common.TILE_SIZE / 2)) / Common.TILE_SIZE;
         int startY = ((int) (y + Common.TILE_SIZE / 2)) / Common.TILE_SIZE;
         long now = System.currentTimeMillis();
-        if (now >= nextPathAt || goalX != targetTileX || goalY != targetTileY || pathIndex >= path.length) {
+        if (now >= nextPathAt) {
             path = findPath(startX, startY, goalX, goalY, map);
             pathIndex = 0;
-            targetTileX = goalX;
-            targetTileY = goalY;
             nextPathAt = now + 400;
         }
         if (pathIndex >= path.length) return;
