@@ -1,22 +1,21 @@
 package source.client;
 
 import source.common.Common;
-import source.common.MapManager;
-import source.common.Protocol;
+import source.common.GameMap;
+import source.common.GameProtocol;
 
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
 
-public class ClientApp extends JFrame implements NetClient.Listener {
+public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
     private String myName = "Player_" + (int)(Math.random() * 100);
-    private final MapManager mapManager;
-    private final GamePanel gamePanel;
+    private final GameMap mapManager;
+    private final ClientGame gamePanel;
 
-    private NetClient netClient;
-    private final ClientPrediction prediction;
-    private final SnapshotInterpolator interpolator;
+    private ClientNetwork netClient;
+    private final ClientMovement movement;
 
     private final CardLayout cardLayout = new CardLayout();
     private final JPanel mainContainer = new JPanel(cardLayout);
@@ -34,14 +33,14 @@ public class ClientApp extends JFrame implements NetClient.Listener {
         setLocationRelativeTo(null);
 
         String mapPath = "source/content/map";
-        mapManager = new MapManager();
+        mapManager = new GameMap();
         mapManager.loadTilesetImage(mapPath + "/tileset.png", Common.ORIGINAL_TILE_SIZE);
         mapManager.loadTilesetProperties(mapPath + "/tileset.tsx");
         mapManager.loadAllChunks(mapPath, Common.MAX_CHUNK_X, Common.MAX_CHUNK_Y);
 
-        gamePanel = new GamePanel(mapManager);
-        prediction = new ClientPrediction(mapManager);
-        interpolator = new SnapshotInterpolator();
+        movement = new ClientMovement(mapManager);
+        gamePanel = new ClientGame(mapManager, movement);
+        gamePanel.setClientAppRef(this);
 
         JPanel menuPanel = createMainMenuUI();
         JPanel lobbyPanel = createLobbyUI();
@@ -181,16 +180,16 @@ public class ClientApp extends JFrame implements NetClient.Listener {
     private void connectToServer() {
         String ip = txtServerIp.getText().trim();
         if (netClient != null) netClient.close();
-        netClient = new NetClient(ip, Common.TCP_PORT, this);
+        netClient = new ClientNetwork(ip, Common.TCP_PORT, this);
         netClient.connect();
     }
 
     private void createNewRoom() {
-        String rName = Protocol.sanitizeRoom(txtCreateRoomName.getText().trim());
-        String pName = Protocol.sanitizeName(txtPlayerNameLobby.getText().trim());
+        String rName = GameProtocol.sanitizeRoom(txtCreateRoomName.getText().trim());
+        String pName = GameProtocol.sanitizeName(txtPlayerNameLobby.getText().trim());
         if (!pName.isEmpty()) myName = pName;
 
-        if (netClient == null || netClient.getState() != NetClient.State.CONNECTED) {
+        if (netClient == null || netClient.getState() != ClientNetwork.State.CONNECTED) {
             connectToServer();
             try { Thread.sleep(300); } catch (InterruptedException ignored) {}
         }
@@ -203,10 +202,10 @@ public class ClientApp extends JFrame implements NetClient.Listener {
 
     private void joinSelectedRoom() {
         String selected = roomJList.getSelectedValue();
-        String pName = Protocol.sanitizeName(txtPlayerNameLobby.getText().trim());
+        String pName = GameProtocol.sanitizeName(txtPlayerNameLobby.getText().trim());
         if (!pName.isEmpty()) myName = pName;
 
-        if (netClient == null || netClient.getState() != NetClient.State.CONNECTED) {
+        if (netClient == null || netClient.getState() != ClientNetwork.State.CONNECTED) {
             connectToServer();
             try { Thread.sleep(300); } catch (InterruptedException ignored) {}
         }
@@ -278,12 +277,12 @@ public class ClientApp extends JFrame implements NetClient.Listener {
 
         gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0), "f6");
         gamePanel.getActionMap().put("f6", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) { prediction.setEnabled(!prediction.isEnabled()); }
+            @Override public void actionPerformed(ActionEvent e) { movement.setPredictionEnabled(!movement.isPredictionEnabled()); }
         });
 
         gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F7, 0), "f7");
         gamePanel.getActionMap().put("f7", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) { interpolator.setEnabled(!interpolator.isEnabled()); }
+            @Override public void actionPerformed(ActionEvent e) { movement.setInterpolationEnabled(!movement.isInterpolationEnabled()); }
         });
 
         gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F9, 0), "f9");
@@ -294,6 +293,14 @@ public class ClientApp extends JFrame implements NetClient.Listener {
         });
     }
 
+    public void sendAttackInput(boolean pressed) {
+        gamePanel.attack = pressed;
+        if (netClient != null && netClient.getState() == ClientNetwork.State.CONNECTED) {
+            ClientMovement.PredictionInput input = movement.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down, pressed);
+            netClient.send("INPUT:" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.seq + ":" + input.attack);
+        }
+    }
+
     private void updateKey(String dir, boolean pressed) {
         switch (dir) {
             case "left": gamePanel.left = pressed; break;
@@ -302,9 +309,9 @@ public class ClientApp extends JFrame implements NetClient.Listener {
             case "down": gamePanel.down = pressed; break;
         }
 
-        if (netClient != null && netClient.getState() == NetClient.State.CONNECTED) {
-            ClientPrediction.Input input = prediction.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down);
-            netClient.send("INPUT:" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.seq);
+        if (netClient != null && netClient.getState() == ClientNetwork.State.CONNECTED) {
+            ClientMovement.PredictionInput input = movement.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down, gamePanel.attack);
+            netClient.send("INPUT:" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.seq + ":" + input.attack);
         }
     }
 
@@ -317,7 +324,7 @@ public class ClientApp extends JFrame implements NetClient.Listener {
                 for (int i = 1; i < items.length; i++) roomListModel.addElement(items[i]);
             });
         } else if (line.startsWith(Common.CMD_STATE)) {
-            gamePanel.updateOnlinePlayers(line, myName);
+            gamePanel.updateOnlineWorld(line, myName);
             updateHudDisplay();
         } else if (line.startsWith(Common.CMD_ERROR)) {
             SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, line.split(":")[1]));
@@ -328,16 +335,16 @@ public class ClientApp extends JFrame implements NetClient.Listener {
         if (netClient == null) return;
         String l1 = String.format("PING %.0f ms (jitter %.1f)   STATE 60/s   down 4.1 KB/s   up 2.0 KB/s",
                 netClient.getRttMs(), netClient.getJitterMs());
-        String l2 = String.format("Du doan [F6]: %s   Noi suy [F7]: %s (%d ms)   Lag gia lap [F4]: %d ms/chieu",
-                prediction.isEnabled() ? "BAT" : "TAT", interpolator.isEnabled() ? "BAT" : "TAT", interpolator.getDelayMs(), netClient.getLagMs());
-        String l3 = String.format("Sai so reconcile: %.2f px (max %.2f)   pending: %d   hieu chinh: %d   ket noi lai: %d   [F9] rot mang",
-                0.0f, prediction.maxError(), prediction.pendingCount(), prediction.correctionCount(), netClient.getReconnectCount());
+        String l2 = String.format("Dự đoán [F6]: %s   Nội suy [F7]: %s (%d ms)   Lag giả lập [F4]: %d ms",
+                movement.isPredictionEnabled() ? "BẬT" : "TẮT", movement.isInterpolationEnabled() ? "BẬT" : "TẮT", movement.getInterpolationDelayMs(), netClient.getLagMs());
+        String l3 = String.format("Sai số reconcile: %.2f px   Pending: %d   Hiệu chỉnh: %d   Reconnect: %d",
+                movement.maxError(), movement.pendingCount(), movement.correctionCount(), netClient.getReconnectCount());
         gamePanel.setHudInfo(l1, l2, l3);
     }
 
     @Override
-    public void onStateChanged(NetClient.State s, String info) {
-        if (s == NetClient.State.RECONNECTING) {
+    public void onStateChanged(ClientNetwork.State s, String info) {
+        if (s == ClientNetwork.State.RECONNECTING) {
             gamePanel.setBannerMessage(info);
         } else {
             gamePanel.setBannerMessage(null);

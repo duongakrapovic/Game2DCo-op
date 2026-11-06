@@ -7,17 +7,9 @@ import java.io.*;
 import java.util.*;
 
 /**
- * ============================================================================
- * MODULE MAP MANAGER (SOURCE/COMMON/MAPMANAGER.JAVA)
- * ============================================================================
- * TUC DUNG:
- *  - Nap va quan ly ma tran Tilemap (Chunk 32x32 TMX).
- *  - Doc file thuoc tinh can .TSX (Fail-Fast: Bao loi dung game ngay neu thieu file).
- *  - Kiem tra va cham toa do World bang thuat toan Math.floorDiv (chong bug lot map).
- *  - Xu ly Camera va ve (render) ban do cho Client.
- * ============================================================================
+ * GAMEMAP.JAVA - Nạp TMX/TSX, quản lý 9 Chunk dữ liệu bản đồ & Render Tilemap
  */
-public class MapManager {
+public class GameMap {
 
     public static class Tile {
         public BufferedImage image;
@@ -42,17 +34,13 @@ public class MapManager {
     private final int chunkSize = Common.CHUNK_SIZE;
     private final Map<String, Chunk> loadedChunks = new HashMap<>();
 
-    public MapManager() {}
+    public GameMap() {}
 
     public void initTileset(int totalTiles) {
-        if (totalTiles <= 0) {
-            throw new IllegalArgumentException("[FATAL ERROR] Tong so tile phai lon hon 0!");
-        }
         tiles = new Tile[totalTiles];
         for (int i = 0; i < totalTiles; i++) {
             tiles[i] = new Tile();
         }
-        System.out.println("[MapManager] Da khoi tao bo nho cho " + totalTiles + " tiles.");
     }
 
     public void loadTilesetImage(String pngPath, int originalTileSize) {
@@ -62,9 +50,7 @@ public class MapManager {
             if (file.exists()) is = new FileInputStream(file);
             else is = getClass().getResourceAsStream("/" + pngPath);
 
-            if (is == null) {
-                throw new FileNotFoundException("[FATAL ERROR] Khong tim thay file anh PNG tai: " + pngPath);
-            }
+            if (is == null) throw new FileNotFoundException("Không tìm thấy file ảnh Tileset: " + pngPath);
 
             BufferedImage tileset = ImageIO.read(is);
             is.close();
@@ -84,9 +70,8 @@ public class MapManager {
                     idx++;
                 }
             }
-            System.out.println("[MapManager] Nap anh Tileset PNG thanh cong!");
         } catch (Exception e) {
-            throw new RuntimeException("[FATAL ERROR] Loi khi nap file anh PNG: " + pngPath, e);
+            System.err.println("[GameMap] Lỗi nạp ảnh PNG: " + e.getMessage());
         }
     }
 
@@ -97,21 +82,16 @@ public class MapManager {
             if (file.exists()) is = new FileInputStream(file);
             else is = getClass().getResourceAsStream("/" + tsxPath);
 
-            if (is == null) {
-                throw new FileNotFoundException("[FATAL ERROR] Khong tim thay file thuoc tinh TSX tai: " + tsxPath);
-            }
+            if (is == null) throw new FileNotFoundException("Không tìm thấy file TSX: " + tsxPath);
 
             BufferedReader br = new BufferedReader(new InputStreamReader(is));
             StringBuilder xmlBuilder = new StringBuilder();
             String line;
-            while ((line = br.readLine()) != null) {
-                xmlBuilder.append(line.trim()).append(" ");
-            }
+            while ((line = br.readLine()) != null) xmlBuilder.append(line.trim()).append(" ");
             br.close();
 
             String xml = xmlBuilder.toString();
             String[] tileBlocks = xml.split("<tile ");
-            int collisionCount = 0;
 
             for (int i = 1; i < tileBlocks.length; i++) {
                 String block = tileBlocks[i];
@@ -125,13 +105,11 @@ public class MapManager {
                         if (tiles != null && tileId >= 0 && tileId < tiles.length) {
                             tiles[tileId].collision = true;
                         }
-                        collisionCount++;
                     }
                 }
             }
-            System.out.println("[MapManager] Parse TSX thanh cong! Tong so tile co va cham: " + collisionCount);
         } catch (Exception e) {
-            throw new RuntimeException("[FATAL ERROR] Loi khi parse file TSX: " + tsxPath, e);
+            System.err.println("[GameMap] Lỗi parse file TSX: " + e.getMessage());
         }
     }
 
@@ -145,9 +123,7 @@ public class MapManager {
             if (f.exists()) is = new FileInputStream(f);
             else is = getClass().getResourceAsStream("/" + folderPath + "/" + fileName);
 
-            if (is == null) {
-                throw new FileNotFoundException("[FATAL ERROR] Khong tim thay file Chunk: " + fileName);
-            }
+            if (is == null) throw new FileNotFoundException("Không tìm thấy file Chunk: " + fileName);
 
             BufferedReader br = new BufferedReader(new InputStreamReader(is));
             StringBuilder xmlBuilder = new StringBuilder();
@@ -173,7 +149,8 @@ public class MapManager {
             }
             return c;
         } catch (Exception e) {
-            throw new RuntimeException("[FATAL ERROR] Loi khi nap file Chunk chunk" + chunkX + "_" + chunkY + ".tmx", e);
+            System.err.println("[GameMap] Lỗi nạp Chunk: " + e.getMessage());
+            return c;
         }
     }
 
@@ -182,15 +159,10 @@ public class MapManager {
             for (int cy = 0; cy < maxChunkY; cy++) {
                 Chunk c = loadChunkFromFile(cx, cy, folderPath);
                 if (c != null) {
-                    addChunk(c);
+                    loadedChunks.put(cx + "_" + cy, c);
                 }
             }
         }
-    }
-
-    public void addChunk(Chunk chunk) {
-        String key = chunk.chunkX + "_" + chunk.chunkY;
-        loadedChunks.put(key, chunk);
     }
 
     public boolean isCollisionAtWorld(int worldX, int worldY) {
@@ -206,8 +178,7 @@ public class MapManager {
 
         if (chunkX >= Common.MAX_CHUNK_X || chunkY >= Common.MAX_CHUNK_Y) return true;
 
-        String key = chunkX + "_" + chunkY;
-        Chunk c = loadedChunks.get(key);
+        Chunk c = loadedChunks.get(chunkX + "_" + chunkY);
         if (c == null) return false;
 
         int tileNum = c.mapTileNum[inChunkRow][inChunkCol];
@@ -224,12 +195,8 @@ public class MapManager {
         int camX = focusWorldX - screenWidth / 2;
         int camY = focusWorldY - screenHeight / 2;
 
-        if (totalMapWidth > screenWidth) {
-            camX = Math.max(0, Math.min(camX, totalMapWidth - screenWidth));
-        }
-        if (totalMapHeight > screenHeight) {
-            camY = Math.max(0, Math.min(camY, totalMapHeight - screenHeight));
-        }
+        if (totalMapWidth > screenWidth) camX = Math.max(0, Math.min(camX, totalMapWidth - screenWidth));
+        if (totalMapHeight > screenHeight) camY = Math.max(0, Math.min(camY, totalMapHeight - screenHeight));
 
         for (Chunk c : loadedChunks.values()) {
             int chunkWorldX = c.chunkX * c.size * Common.TILE_SIZE;

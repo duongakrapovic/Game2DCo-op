@@ -1,8 +1,8 @@
 package source.server;
 
 import source.common.Common;
-import source.common.MapManager;
-import source.common.PhysicsEngine;
+import source.common.GameMap;
+import source.common.GamePhysics;
 import source.common.Player;
 
 import java.util.Map;
@@ -15,14 +15,14 @@ public class GameRoom implements Runnable {
     private final Map<String, TcpLobbyServer.ClientHandler> clientHandlers = new ConcurrentHashMap<>();
     private final Map<String, Integer> lastAcks = new ConcurrentHashMap<>();
 
-    private final MapManager mapManager;
+    private final GameMap mapManager;
     private volatile boolean isRunning = true;
     private final Thread loopThread;
 
     public GameRoom(String roomId) {
         this.roomId = roomId;
 
-        this.mapManager = new MapManager();
+        this.mapManager = new GameMap();
         String mapPath = "source/content/map";
         this.mapManager.initTileset(256);
         this.mapManager.loadTilesetProperties(mapPath + "/tileset.tsx");
@@ -74,7 +74,7 @@ public class GameRoom implements Runnable {
 
         while (isRunning) {
             for (Player p : players.values()) {
-                PhysicsEngine.updatePlayer(p, mapManager);
+                GamePhysics.updatePlayer(p, mapManager);
             }
 
             broadcastTcpState();

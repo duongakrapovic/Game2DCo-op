@@ -1,7 +1,7 @@
 package source.server;
 
 import source.common.Common;
-import source.common.Protocol;
+import source.common.GameProtocol;
 import source.common.Player;
 
 import java.io.*;
@@ -105,7 +105,7 @@ public class TcpLobbyServer {
                 send(app.getRoomListMessage());
 
                 String line;
-                while ((line = Protocol.readLineLimited(in, Protocol.MAX_LINE_LENGTH_CLIENT)) != null) {
+                while ((line = GameProtocol.readLineLimited(in, GameProtocol.MAX_LINE_LENGTH_CLIENT)) != null) {
                     handleCommand(line.trim());
                 }
             } catch (IOException ignored) {
@@ -163,8 +163,8 @@ public class TcpLobbyServer {
                         send(Common.CMD_ERROR + ":Lệnh thiếu tham số!");
                         return;
                     }
-                    String rName = Protocol.sanitizeRoom(parts[1]);
-                    String pName = Protocol.sanitizeName(parts[2]);
+                    String rName = GameProtocol.sanitizeRoom(parts[1]);
+                    String pName = GameProtocol.sanitizeName(parts[2]);
 
                     leaveCurrentRoomIfAny();
 
@@ -188,8 +188,8 @@ public class TcpLobbyServer {
                         send(Common.CMD_ERROR + ":Lệnh thiếu tham số!");
                         return;
                     }
-                    String targetRName = Protocol.sanitizeRoom(parts[1]);
-                    String targetPName = Protocol.sanitizeName(parts[2]);
+                    String targetRName = GameProtocol.sanitizeRoom(parts[1]);
+                    String targetPName = GameProtocol.sanitizeName(parts[2]);
 
                     GameRoom targetRoom = app.getRoom(targetRName);
                     if (targetRoom == null) {
