@@ -30,8 +30,8 @@ Hệ thống là một **game 2D top-down co-op nhiều người chơi** xây d�
 [ClientApp A] ──┐
 [ClientApp B] ──┼──TCP:8888──► [ServerApp]
 [ClientApp C] ──┘                   │
-                               [GameRoom]
-                               (quản lý phòng, physics 60FPS)
+                               [ServerGame]
+                               (quản lý phòng, physics 60 tick/s)
                                     │
                               [MapManager]
                               (9 chunks TMX 3×3)
@@ -122,7 +122,7 @@ tự lọc các ký tự này (xem `Protocol.sanitizeName / sanitizeRoom`). Clie
 | Tạo phòng | `CREATE_ROOM:<phòng>:<tên>` | Tạo phòng và vào ngay. Trả `JOINED` hoặc `ERROR` |
 | Vào phòng | `JOIN_ROOM:<phòng>:<tên>` | Vào phòng có sẵn (tối đa `MAX_PLAYERS_PER_ROOM` = 4). Tự rời phòng cũ nếu đang ở phòng khác |
 | Rời phòng | `LEAVE_ROOM` | Rời phòng, về sảnh |
-| Gửi đầu vào | `INPUT:<left>:<right>:<up>:<down>[:<seq>]` | Trạng thái phím (`true`/`false`), gửi **mỗi tick 60 Hz** kèm `seq` tăng dần. `seq` không bắt buộc (client cũ) |
+| Gửi đầu vào | `INPUT:<left>:<right>:<up>:<down>[:<seq>[:<attack>]]` | Trạng thái di chuyển, sequence và cờ attack; các trường cuối có thể bỏ qua với client cũ |
 | Heartbeat | `PING:<t>` | Mỗi 1 giây; server trả nguyên `t` trong `PONG` |
 | Kết nối lại | `RESUME:<token>` | Gửi trên kết nối mới sau khi rớt mạng để lấy lại chỗ trong phòng |
 
@@ -134,7 +134,7 @@ tự lọc các ký tự này (xem `Protocol.sanitizeName / sanitizeRoom`). Clie
 | Danh sách phòng | `ROOM_LIST;<phòng1> (N người);...` | Khi kết nối, khi được hỏi, và **tự đẩy** cho người ở sảnh mỗi khi phòng thay đổi |
 | Đã vào phòng | `JOINED:<phòng>` | Client chỉ chuyển sang màn hình game khi nhận được lệnh này |
 | Đã rời phòng | `LEFT` | Phản hồi `LEAVE_ROOM` |
-| Trạng thái game | `STATE;<id>,<tên>,<x>,<y>,<hướng>,<frame>,<ack>;...` | 60 lần/giây. `x,y` có 2 chữ số thập phân; `ack` = `seq` cuối cùng server đã xử lý cho người đó (`-1` nếu chưa có) |
+| Trạng thái game | `STATE#PLAYERS:<...>#MONSTERS:<...>` | Snapshot người chơi và slime do server phát ở 60 tick/s |
 | Trả lời ping | `PONG:<t>` | Echo của `PING` |
 | Kết nối lại | `RESUMED:<phòng>` / `RESUME_FAIL` | Kết quả của `RESUME` |
 | Lỗi | `ERROR:<thôngBáo>` | Sai cú pháp, phòng đầy / đã tồn tại / không tồn tại... |
@@ -145,8 +145,8 @@ Server → Client : WELCOME:P1:9f3a1c5e7b2d4a60
 Server → Client : ROOM_LIST
 Client → Server : CREATE_ROOM:DungeonA:Duc
 Server → Client : JOINED:DungeonA
-Client → Server : INPUT:false:true:false:false:0        (tick 0: đi phải)
-Server → Client : STATE;P1,Duc,712.0,576.0,right,2,0    (đã xử lý seq 0)
+Client → Server : INPUT:false:true:false:false:0:false  (tick 0: đi phải)
+Server → Client : STATE#PLAYERS:P1,Duc,...#MONSTERS:M1,SLIME,...
 Client → Server : PING:81234567890
 Server → Client : PONG:81234567890
 ```
@@ -157,7 +157,7 @@ Server → Client : PONG:81234567890
 
 | # | Cơ chế | Giải quyết vấn đề gì | Cài đặt |
 |---|--------|----------------------|---------|
-| 1 | **Tick cố định 60 Hz + hàng đợi input có `seq`** | Server chạy đúng 60 tick/s (bộ tích lũy thời gian, không trôi). Mỗi `seq` = đúng 1 bước vật lý ⇒ kết quả tất định | `GameRoom` |
+| 1 | **Tick cố định 60 Hz + xác nhận input có `seq`** | Server cập nhật vị trí và trạng thái phòng theo tick; `ack` xác nhận sequence input đã nhận | `ServerGame` |
 | 2 | **Client-side prediction + server reconciliation** | Nhân vật của mình phản hồi tức thì thay vì chờ RTT. Khi có `STATE`: bỏ input đã `ack`, lấy vị trí server làm gốc rồi chạy lại input chưa `ack` | `ClientPrediction` |
 | 3 | **Entity interpolation** | Người chơi khác di chuyển mượt dù gói đến không đều: vẽ "chậm 100 ms" và nội suy giữa 2 snapshot | `SnapshotInterpolator` |
 | 4 | **Heartbeat + timeout** | `PING/PONG` mỗi giây đo RTT & jitter; không nhận gì 6 s (client) / 10 s (server) ⇒ coi là rớt mạng | `NetClient`, `ClientHandler` |
@@ -235,13 +235,10 @@ Game2DCo-op/
     │   ├── PhysicsEngine.java   ← Vật lý top-down tất định (server & client dự đoán dùng chung)
     │   └── MapManager.java      ← Nạp bản đồ TMX, va chạm tile
     ├── server/
-    │   ├── ServerApp.java       ← Entry point, quản lý phòng + phiên (ân hạn / resume)
-    │   ├── ClientHandler.java   ← Đọc & kiểm tra lệnh của 1 client
-    │   ├── Session.java         ← Phiên người chơi (độc lập với socket)
-    │   ├── GameRoom.java        ← Phòng: tick 60 Hz, hàng đợi input, STATE
-    │   ├── OutChannel.java      ← Kênh gửi không chặn, gộp snapshot
-    │   ├── GameLogger.java      ← Log CSV trạng thái game
-    │   └── ServerStats.java     ← Thống kê lưu lượng
+    │   ├── ServerApp.java       ← Entry point, quản lý phòng và phiên
+    │   ├── ServerNetwork.java   ← TCP accept, đọc input và gửi snapshot
+    │   ├── ServerSession.java   ← ID, token và trạng thái phiên
+    │   └── ServerGame.java      ← Phòng, game loop 60 Hz, slime và chiến đấu
     ├── client/
     │   ├── ClientApp.java       ← UI Swing, lobby, vẽ, HUD
     │   ├── NetClient.java       ← TCP, heartbeat, tự kết nối lại, giả lập lag
