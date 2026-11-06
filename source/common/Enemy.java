@@ -5,6 +5,7 @@ public class Enemy {
     public static final int MAX_HEALTH = 100;
     public static final long ATTACK_COOLDOWN_MS = 1200;
     public static final long HIT_FLASH_MS = 150;
+    private static final int MAX_PATH_NODES = 512;
 
     public final String id;
     public final String name;
@@ -50,10 +51,19 @@ public class Enemy {
         float attackDy = target.y - y;
         if (attackDx * attackDx + attackDy * attackDy <= 48f * 48f
                 && hasLineOfSight(target, map)) {
+            if (Math.abs(attackDx) > Math.abs(attackDy)) {
+                direction = attackDx < 0 ? "left" : "right";
+            } else {
+                direction = attackDy < 0 ? "up" : "down";
+            }
             if (now >= nextAttackAt) {
                 target.takeDamage("E_MONSTER".equals(id) ? 15 : 10, x, y, map, now);
                 nextAttackAt = now + ATTACK_COOLDOWN_MS;
             }
+            // Hold position and face the player while attacking. Repath immediately
+            // if the player leaves attack range on the next update.
+            nextPathAt = now;
+            return;
         }
         int goalX = ((int) (target.x + Common.TILE_SIZE / 2)) / Common.TILE_SIZE;
         int goalY = ((int) (target.y + Common.TILE_SIZE / 2)) / Common.TILE_SIZE;
@@ -149,43 +159,63 @@ public class Enemy {
         final int width = Common.MAX_CHUNK_X * Common.CHUNK_SIZE;
         final int height = Common.MAX_CHUNK_Y * Common.CHUNK_SIZE;
         if (!walkable(sx, sy, width, height, map) || !walkable(gx, gy, width, height, map)) return new int[0][2];
-        int[][] cost = new int[width][height];
-        int[][] parentX = new int[width][height];
-        int[][] parentY = new int[width][height];
-        for (int xx = 0; xx < width; xx++) {
-            java.util.Arrays.fill(cost[xx], Integer.MAX_VALUE);
-            java.util.Arrays.fill(parentX[xx], -1);
-        }
+        int start = sy * width + sx;
+        int goal = gy * width + gx;
+        java.util.Map<Integer, Integer> cost = new java.util.HashMap<>();
+        java.util.Map<Integer, Integer> parent = new java.util.HashMap<>();
         java.util.PriorityQueue<Node> open = new java.util.PriorityQueue<>();
-        cost[sx][sy] = 0;
-        open.add(new Node(sx, sy, 0, Math.abs(gx - sx) + Math.abs(gy - sy)));
+        int startH = heuristic(sx, sy, gx, gy);
+        cost.put(start, 0);
+        open.add(new Node(sx, sy, 0, startH));
         int[] ox = {1, -1, 0, 0};
         int[] oy = {0, 0, 1, -1};
-        while (!open.isEmpty()) {
+        int best = start;
+        int bestH = startH;
+        int expanded = 0;
+        while (!open.isEmpty() && expanded < MAX_PATH_NODES) {
             Node n = open.poll();
-            if (n.g != cost[n.x][n.y]) continue;
-            if (n.x == gx && n.y == gy) break;
+            int current = n.y * width + n.x;
+            if (n.g != cost.getOrDefault(current, Integer.MAX_VALUE)) continue;
+            expanded++;
+
+            int h = heuristic(n.x, n.y, gx, gy);
+            if (h < bestH) {
+                best = current;
+                bestH = h;
+            }
+            if (current == goal) {
+                best = goal;
+                break;
+            }
+
             for (int d = 0; d < 4; d++) {
                 int nx = n.x + ox[d], ny = n.y + oy[d];
-                if (!walkable(nx, ny, width, height, map) || cost[nx][ny] <= n.g + 1) continue;
-                cost[nx][ny] = n.g + 1;
-                parentX[nx][ny] = n.x;
-                parentY[nx][ny] = n.y;
-                int h = Math.abs(gx - nx) + Math.abs(gy - ny);
-                open.add(new Node(nx, ny, n.g + 1, n.g + 1 + h));
+                if (!walkable(nx, ny, width, height, map)) continue;
+                int next = ny * width + nx;
+                int candidateCost = n.g + 1;
+                if (candidateCost >= cost.getOrDefault(next, Integer.MAX_VALUE)) continue;
+                cost.put(next, candidateCost);
+                parent.put(next, current);
+                int nextH = heuristic(nx, ny, gx, gy);
+                open.add(new Node(nx, ny, candidateCost, candidateCost + nextH));
             }
         }
-        if (cost[gx][gy] == Integer.MAX_VALUE) return new int[0][2];
+
+        if (best == start) return new int[0][2];
         java.util.ArrayList<int[]> reversed = new java.util.ArrayList<>();
-        int x = gx, y = gy;
-        while (x != sx || y != sy) {
-            reversed.add(new int[]{x, y});
-            int px = parentX[x][y], py = parentY[x][y];
-            if (px < 0) return new int[0][2];
-            x = px; y = py;
+        int current = best;
+        while (current != start) {
+            reversed.add(new int[]{current % width, current / width});
+            Integer previous = parent.get(current);
+            if (previous == null) return new int[0][2];
+            current = previous;
         }
         java.util.Collections.reverse(reversed);
         return reversed.toArray(new int[reversed.size()][]);
+    }
+
+    private static int heuristic(int x, int y, int goalX, int goalY) {
+        return Math.abs(goalX - x) + Math.abs(goalY - y);
     }
 
     private static boolean walkable(int x, int y, int width, int height, MapManager map) {
@@ -197,6 +227,10 @@ public class Enemy {
     private static final class Node implements Comparable<Node> {
         final int x, y, g, f;
         Node(int x, int y, int g, int f) { this.x = x; this.y = y; this.g = g; this.f = f; }
-        @Override public int compareTo(Node other) { return Integer.compare(f, other.f); }
+        @Override public int compareTo(Node other) {
+            int byCost = Integer.compare(f, other.f);
+            if (byCost != 0) return byCost;
+            return Integer.compare(g, other.g);
+        }
     }
 }
