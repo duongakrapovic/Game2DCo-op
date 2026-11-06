@@ -2,88 +2,115 @@ package source.server;
 
 import source.common.Common;
 import source.common.MapManager;
-import source.common.Player;
 import source.common.PhysicsEngine;
-import java.io.PrintWriter;
+import source.common.Player;
+
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * ============================================================================
+ * GAME ROOM (SOURCE/SERVER/GAMEROOM.JAVA)
+ * ============================================================================
+ * Chạy Game Loop 60 FPS độc lập cho 1 phòng chơi.
+ * Tính toán vật lý và broadcast trạng thái (STATE) qua TCP đến các Client trong phòng.
+ * ============================================================================
+ */
 public class GameRoom implements Runnable {
-    public String roomName;
-    public Map<String, Player> players = new ConcurrentHashMap<>();
-    public Map<String, PrintWriter> writers = new ConcurrentHashMap<>();
-    private boolean isRunning = true;
-    private MapManager mapManager;
 
-    public GameRoom(String roomName) {
-        this.roomName = roomName;
-        
-        // Khởi tạo MapManager mới
+    private final String roomId;
+    private final Map<String, Player> players = new ConcurrentHashMap<>();
+    private final Map<String, TcpLobbyServer.ClientHandler> clientHandlers = new ConcurrentHashMap<>();
+
+    private final MapManager mapManager;
+    private volatile boolean isRunning = true;
+    private final Thread loopThread;
+
+    public GameRoom(String roomId) {
+        this.roomId = roomId;
+
         this.mapManager = new MapManager();
-        
-        // Đường dẫn chính xác tới thư mục chứa dữ liệu map
         String mapPath = "source/content/map";
-        
-        // 1. Khởi tạo bắt buộc bộ nhớ cho mảng tiles (Truyền số lượng tile của Tileset, mặc định 256)
-        // Nếu không gọi hàm này -> loadTilesetProperties sẽ crash ngay lập tức!
         this.mapManager.initTileset(256);
-        
-        // 2. Nạp thuộc tính cản .tsx (Nếu file hỏng/thiếu -> crash ngay)
         this.mapManager.loadTilesetProperties(mapPath + "/tileset.tsx");
-        
-        // 3. Nạp toàn bộ ma trận 9 Chunks (3x3: từ chunk0_0 tới chunk2_2)
         this.mapManager.loadAllChunks(mapPath, Common.MAX_CHUNK_X, Common.MAX_CHUNK_Y);
 
-        new Thread(this).start();
+        this.loopThread = new Thread(this, "RoomLoop-" + roomId);
+        this.loopThread.start();
     }
 
-    public void addPlayer(String pId, Player p, PrintWriter out) {
-        players.put(pId, p);
-        writers.put(pId, out);
+    public String getRoomId() { return roomId; }
+    public Map<String, Player> getPlayers() { return players; }
+    public int getPlayerCount() { return players.size(); }
+    public boolean isFull() { return players.size() >= Common.MAX_PLAYERS_PER_ROOM; }
+    public boolean isEmpty() { return players.isEmpty(); }
+
+    public void addPlayer(Player player, TcpLobbyServer.ClientHandler handler) {
+        players.put(player.id, player);
+        if (handler != null) {
+            clientHandlers.put(player.id, handler);
+        }
     }
 
-    public void removePlayer(String pId) {
-        players.remove(pId);
-        writers.remove(pId);
+    public void removePlayer(String playerId) {
+        players.remove(playerId);
+        clientHandlers.remove(playerId);
     }
 
-    public void stopRoom() {
-        this.isRunning = false;
+    public void stop() {
+        isRunning = false;
+        if (loopThread != null) {
+            loopThread.interrupt();
+        }
     }
 
     @Override
     public void run() {
+        long nextTick = System.nanoTime();
+
         while (isRunning) {
+            // 1. Cập nhật vật lý cho tất cả player trong phòng
             for (Player p : players.values()) {
-                // Tính toán vật lý & va chạm tilemap cho từng người chơi
                 PhysicsEngine.updatePlayer(p, mapManager);
             }
-            broadcastState();
-            try {
-                Thread.sleep(16); // 60 FPS Game Loop
-            } catch (InterruptedException e) {
-                e.printStackTrace();
+
+            // 2. Broadcast trạng thái tọa độ qua TCP
+            broadcastTcpState();
+
+            // 3. Đồng hồ nhịp 60Hz ổn định
+            nextTick += Common.TICK_NS;
+            long sleepNs = nextTick - System.nanoTime();
+            if (sleepNs > 0) {
+                try {
+                    Thread.sleep(sleepNs / 1_000_000L, (int) (sleepNs % 1_000_000L));
+                } catch (InterruptedException e) {
+                    break;
+                }
+            } else {
+                nextTick = System.nanoTime();
             }
         }
     }
 
-    private void broadcastState() {
+    /**
+     * Đóng gói tọa độ và gửi trạng thái STATE qua TCP cho từng Client trong phòng
+     */
+    private void broadcastTcpState() {
+        if (players.isEmpty()) return;
+
         StringBuilder sb = new StringBuilder(Common.CMD_STATE);
-        // Tạo bản sao snapshot để tránh xung đột khi r/w concurrent
-        for (Player p : new java.util.ArrayList<>(players.values())) {
-            if (p == null) continue;
+        for (Player p : players.values()) {
             sb.append(";").append(p.id).append(",")
-            .append(p.name).append(",")
-            .append((int) p.x).append(",")
-            .append((int) p.y).append(",")
-            .append(p.direction).append(",")
-            .append(p.spriteNum);
+              .append(p.name).append(",")
+              .append((int)p.x).append(",")
+              .append((int)p.y).append(",")
+              .append(p.direction).append(",")
+              .append(p.spriteNum);
         }
-        String msg = sb.toString();
-        for (PrintWriter out : new java.util.ArrayList<>(writers.values())) {
-            if (out != null) {
-                out.println(msg);
-            }
+
+        String stateMsg = sb.toString();
+        for (TcpLobbyServer.ClientHandler handler : clientHandlers.values()) {
+            handler.send(stateMsg);
         }
     }
 }

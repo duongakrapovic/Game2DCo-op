@@ -5,10 +5,12 @@
 ## 🎯 MỤC TIÊU
 
 Server chịu trách nhiệm:
-- Lắng nghe kết nối TCP từ nhiều client đồng thời (mỗi client một luồng riêng)
-- Quản lý danh sách **Game Room** (tạo phòng, vào phòng, xóa phòng khi trống)
-- Chạy **vòng lặp vật lý game 60 FPS** trong mỗi phòng (server-authoritative)
-- Broadcast trạng thái tất cả người chơi (`STATE`) cho toàn bộ client trong phòng
+- Lắng nghe kết nối TCP từ nhiều client đồng thời (mỗi client một luồng đọc + một luồng gửi)
+- Quản lý **Game Room**: tạo, vào, rời, xóa phòng trống; giới hạn 4 người/phòng
+- Chạy **vòng lặp game cố định 60 tick/giây** trong mỗi phòng (server-authoritative)
+- Broadcast trạng thái (`STATE`) cho cả phòng, kèm `ack` để client dự đoán/hòa giải
+- Giữ chỗ người chơi bị rớt mạng 20 giây để họ kết nối lại (`RESUME`)
+- Kiểm tra mọi dữ liệu từ client, ghi log CSV và thống kê lưu lượng
 
 ---
 
@@ -17,10 +19,10 @@ Server chịu trách nhiệm:
 | Thành phần | Công nghệ |
 |------------|-----------|
 | Ngôn ngữ | Java 17+ |
-| Mạng | `java.net.ServerSocket` / `Socket` (TCP) |
-| Đa luồng | `Thread` per client + `ConcurrentHashMap` |
-| Vật lý | `PhysicsEngine` (top-down, va chạm tile) |
-| Bản đồ | `MapManager` (đọc file TMX chunk) |
+| Mạng | `ServerSocket` / `Socket` (TCP, `TCP_NODELAY`, `SO_KEEPALIVE`, UTF-8) |
+| Đa luồng | Luồng đọc/client (`ClientHandler`), luồng gửi/client (`OutChannel`), luồng game loop/phòng, `ScheduledExecutorService` cho thời gian ân hạn |
+| Vật lý | `common/PhysicsEngine` (cùng mã với client để dự đoán khớp) |
+| Bản đồ | `common/MapManager` — nạp 1 lần, dùng chung cho mọi phòng |
 
 ---
 
@@ -34,67 +36,62 @@ run-server.bat
 
 ### Cách 2: Thủ công
 ```bash
-# Đứng ở thư mục gốc project
 javac -encoding UTF-8 source/common/*.java source/server/*.java
-java -cp . source.server.ServerApp
+java -cp . source.server.ServerApp            # port mặc định 8888
+java -cp . source.server.ServerApp 9000       # đổi port
+java -cp . source.server.ServerApp --no-log   # không ghi log CSV
 ```
 
-Server khởi động và lắng nghe tại: **TCP port `8888`**
+Tuỳ chọn JVM: `-Dlog.every=<số tick>` (mặc định 6 = log 10 Hz), `-Dgame.log=false`.
 
 ---
 
 ## 📦 CẤU TRÚC MODULE
 
-```
-source/server/
-├── README.md
-├── ServerApp.java       ← Entry point: mở ServerSocket, tạo thread mỗi client
-├── GameRoom.java        ← Quản lý 1 phòng chơi, chạy game loop 60FPS
-└── PhysicsEngine.java   ← Tính vật lý top-down, kiểm tra va chạm tile
-```
-
-### Vai trò từng class
-
 | Class | Trách nhiệm |
 |-------|------------|
-| `ServerApp` | Mở `ServerSocket(8888)`, vòng lặp `accept()`, spawn `ClientHandler` thread |
-| `ClientHandler` | Đọc lệnh từ 1 client, xử lý `CREATE_ROOM` / `JOIN_ROOM` / `INPUT` |
-| `GameRoom` | Lưu danh sách player + writer, chạy vòng lặp 60FPS, gọi physics, broadcast `STATE` |
-| `PhysicsEngine` | Cập nhật vị trí player theo input, xử lý va chạm với tile map |
+| `ServerApp` | `main`, vòng `accept()`, quản lý phòng + phiên (tạo/vào/rời/xóa, thời gian ân hạn, đẩy `ROOM_LIST`). Mọi thao tác phòng đi qua một `LOCK` |
+| `ClientHandler` | Đọc từng dòng lệnh của 1 client, kiểm tra hợp lệ, gọi `ServerApp`/`GameRoom`. Chống flood (300 msg/s), dòng quá dài, lệnh sai |
+| `Session` | Phiên người chơi (id, token, phòng, kênh gửi hiện tại) — tồn tại độc lập với socket |
+| `GameRoom` | 1 phòng: tick 60 Hz bằng bộ tích lũy thời gian, hàng đợi input theo `seq`, vật lý, broadcast `STATE`, log |
+| `OutChannel` | Luồng gửi riêng cho từng client. `sendReliable()` cho lệnh điều khiển; `sendState()` gộp snapshot cũ ⇒ client chậm không làm đứng phòng |
+| `GameLogger` | Ghi `logs/game_state_<phòng>_<thời gian>.csv` bất đồng bộ |
+| `ServerStats` | Đếm message/byte, in và ghi `logs/net_stats.csv` mỗi 5 giây |
+
+### Đồng bộ input (quan trọng khi mở rộng)
+- Client gửi `INPUT` **mỗi tick** kèm `seq`. Mỗi tick server lấy tối đa 2 input trong hàng đợi của người chơi, mỗi input = **đúng 1 bước** `PhysicsEngine.updatePlayer`; `ack` = `seq` cuối cùng đã xử lý.
+- Nếu hàng đợi rỗng, server **không tự bịa thêm bước đi** (giữ cho mô phỏng tất định).
+- ⚠️ Nếu gameplay thay đổi vị trí người chơi ngoài `PhysicsEngine` (đẩy lùi, dịch chuyển...), client sẽ tự sửa lại vị trí ở lần `STATE` kế tiếp (giật nhẹ). Nên đưa các thay đổi đó vào `PhysicsEngine` hoặc chấp nhận hiệu chỉnh.
+
+### Điểm mở rộng cho gameplay (không cần sửa code mạng)
+- `GameRoom.onCommand(pId, cmd, parts)`: lệnh không thuộc giao thức cơ bản (ví dụ `ATTACK`, `CHAT`) được chuyển vào đây; trả `true` nếu đã xử lý.
+- `GameRoom.broadcast(msg)`: gửi 1 message đáng tin cậy cho cả phòng (ví dụ `CHAT:...`, `GAME_OVER`).
+- `GameRoom.tick()`: nơi thêm logic quái vật, va chạm... mỗi tick.
+- Thêm trường vào cuối mỗi bản ghi người chơi trong `STATE` là an toàn: client chỉ đọc 7 trường đầu và bỏ qua phần còn lại.
 
 ---
 
-## 🔗 GIAO THỨC NHẬN / GỬI
+## 🔗 GIAO THỨC
 
-### Nhận từ Client
-| Lệnh | Định dạng |
-|------|-----------|
-| Lấy phòng | `ROOM_LIST` |
-| Tạo phòng | `CREATE_ROOM:<tênPhòng>:<tênNgườiChơi>` |
-| Vào phòng | `JOIN_ROOM:<tênPhòng>:<tênNgườiChơi>` |
-| Input phím | `INPUT:<left>:<right>:<up>:<down>` |
+Xem bảng đầy đủ trong `README.md` ở thư mục gốc. Tóm tắt:
 
-### Gửi về Client
-| Lệnh | Định dạng |
-|------|-----------|
-| Danh sách phòng | `ROOM_LIST;<tên> (N người);...` |
-| Trạng thái game | `STATE;<id>,<tên>,<x>,<y>;...` |
-| Lỗi | `ERROR:<thôngBáo>` |
+| Nhận từ client | Gửi về client |
+|----------------|---------------|
+| `ROOM_LIST`, `CREATE_ROOM:<phòng>:<tên>`, `JOIN_ROOM:<phòng>:<tên>`, `LEAVE_ROOM`, `INPUT:l:r:u:d[:seq]`, `PING:<t>`, `RESUME:<token>` | `WELCOME`, `ROOM_LIST;...`, `JOINED`, `LEFT`, `STATE;...`, `PONG`, `RESUMED`, `RESUME_FAIL`, `ERROR` |
 
 ---
 
 ## 🧪 TEST
 
-Kiểm tra server đang chạy bằng Telnet:
-```bash
-telnet localhost 8888
-```
-Gõ `ROOM_LIST` rồi Enter → server phải trả về `ROOM_LIST` (danh sách trống khi chưa có phòng).
+Kiểm thử tự động (cần server đang chạy): `run-selftest.bat`. Đo tải: `run-bench.bat localhost 40 10`.
+
+Thử thủ công bằng `telnet localhost 8888`: server gửi `WELCOME` và `ROOM_LIST` ngay. Lưu ý server **ngắt kết nối sau 10 giây
+không nhận được gì** — gõ `PING:1` định kỳ để giữ kết nối.
 
 ---
 
 ## 📝 GHI CHÚ
 
-- Port mặc định: **8888** — có thể đổi tại `source/common/Common.java`
-- Server chạy **server-authoritative**: mọi tính toán vật lý đều ở server
-- Mỗi `GameRoom` chạy trên 1 thread riêng với game loop `Thread.sleep(16)` (~60 FPS)
+- Port mặc định **8888** (`Common.PORT`), đổi bằng tham số dòng lệnh.
+- Server-authoritative: vị trí và va chạm chỉ do server quyết định; client chỉ dự đoán để phản hồi tức thì.
+- Khi một người rớt mạng, nhân vật đứng yên trong phòng tối đa 20 giây (`Protocol.RECONNECT_GRACE_MS`); hết hạn thì bị xóa.

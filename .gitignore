@@ -21,3 +21,5 @@ out/
 !run-client.bat
 !.gitignore
 !README.md
+# Log do server / cong cu do tai sinh ra
+logs/

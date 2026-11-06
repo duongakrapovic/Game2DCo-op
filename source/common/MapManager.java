@@ -5,9 +5,20 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.*;
 import java.util.*;
-import java.util.List;
 
+/**
+ * ============================================================================
+ * MODULE MAP MANAGER (SOURCE/COMMON/MAPMANAGER.JAVA)
+ * ============================================================================
+ * TUC DUNG:
+ *  - Nap va quan ly ma tran Tilemap (Chunk 32x32 TMX).
+ *  - Doc file thuoc tinh can .TSX (Fail-Fast: Bao loi dung game ngay neu thieu file).
+ *  - Kiem tra va cham toa do World bang thuat toan Math.floorDiv (chong bug lot map).
+ *  - Xu ly Camera va ve (render) ban do cho Client.
+ * ============================================================================
+ */
 public class MapManager {
+
     public static class Tile {
         public BufferedImage image;
         public boolean collision = false;
@@ -27,15 +38,12 @@ public class MapManager {
     }
 
     private Tile[] tiles;
+    private final Set<Integer> collisionTiles = new HashSet<>();
     private final int chunkSize = Common.CHUNK_SIZE;
     private final Map<String, Chunk> loadedChunks = new HashMap<>();
 
     public MapManager() {}
 
-    /**
-     * Khởi tạo mảng tiles với số lượng tile xác định.
-     * Bắt buộc phải gọi trước khi loadTilesetProperties hoặc loadTilesetImage.
-     */
     public void initTileset(int totalTiles) {
         if (totalTiles <= 0) {
             throw new IllegalArgumentException("[FATAL ERROR] Tong so tile phai lon hon 0!");
@@ -55,7 +63,7 @@ public class MapManager {
             else is = getClass().getResourceAsStream("/" + pngPath);
 
             if (is == null) {
-                throw new FileNotFoundException("[FATAL ERROR] Khong tim thấy file anh Tileset PNG tai: " + pngPath);
+                throw new FileNotFoundException("[FATAL ERROR] Khong tim thay file anh PNG tai: " + pngPath);
             }
 
             BufferedImage tileset = ImageIO.read(is);
@@ -65,7 +73,6 @@ public class MapManager {
             int rows = tileset.getHeight() / originalTileSize;
             int totalTiles = cols * rows;
 
-            // Neu mảng tiles chưa được khởi tạo, tự động khởi tạo theo kích thước ảnh
             if (tiles == null || tiles.length < totalTiles) {
                 initTileset(totalTiles);
             }
@@ -84,11 +91,6 @@ public class MapManager {
     }
 
     public void loadTilesetProperties(String tsxPath) {
-        // Kiểm tra nguyên tắc Fail Fast: Nếu chưa cấp phát tiles -> CRASH NGAY
-        if (tiles == null) {
-            throw new IllegalStateException("[FATAL ERROR] Mang tiles chua duoc khoi tao! Hay goi initTileset() hoac loadTilesetImage() truoc!");
-        }
-
         try {
             InputStream is = null;
             File file = new File(tsxPath);
@@ -96,7 +98,7 @@ public class MapManager {
             else is = getClass().getResourceAsStream("/" + tsxPath);
 
             if (is == null) {
-                throw new FileNotFoundException("[FATAL ERROR] Khong tim thấy file thuoc tinh TSX tai: " + tsxPath);
+                throw new FileNotFoundException("[FATAL ERROR] Khong tim thay file thuoc tinh TSX tai: " + tsxPath);
             }
 
             BufferedReader br = new BufferedReader(new InputStreamReader(is));
@@ -119,16 +121,15 @@ public class MapManager {
                     int tileId = Integer.parseInt(block.substring(startId, endId));
 
                     if (block.contains("name=\"collision\"") && (block.contains("value=\"true\"") || block.contains("value=\"1\""))) {
-                        if (tileId >= 0 && tileId < tiles.length) {
+                        collisionTiles.add(tileId);
+                        if (tiles != null && tileId >= 0 && tileId < tiles.length) {
                             tiles[tileId].collision = true;
-                            collisionCount++;
-                        } else {
-                            throw new IndexOutOfBoundsException("[FATAL ERROR] Tile ID " + tileId + " trong TSX vuot qua kich thuoc mang tiles (" + tiles.length + ")");
                         }
+                        collisionCount++;
                     }
                 }
             }
-            System.out.println("[MapManager] Parse thuoc tinh TSX hoan tat! Tong so tile co va cham: " + collisionCount);
+            System.out.println("[MapManager] Parse TSX thanh cong! Tong so tile co va cham: " + collisionCount);
         } catch (Exception e) {
             throw new RuntimeException("[FATAL ERROR] Loi khi parse file TSX: " + tsxPath, e);
         }
@@ -145,7 +146,7 @@ public class MapManager {
             else is = getClass().getResourceAsStream("/" + folderPath + "/" + fileName);
 
             if (is == null) {
-                throw new FileNotFoundException("[FATAL ERROR] Khong tim thấy file Chunk TMX: " + fileName + " trong thư mục: " + folderPath);
+                throw new FileNotFoundException("[FATAL ERROR] Khong tim thay file Chunk: " + fileName);
             }
 
             BufferedReader br = new BufferedReader(new InputStreamReader(is));
@@ -196,22 +197,21 @@ public class MapManager {
         if (worldX < 0 || worldY < 0) return true;
 
         int tileCol = Math.floorDiv(worldX, Common.TILE_SIZE);
-        int tileRow = Math.floorDiv(worldY, Common.TILE_SIZE);  
-        
+        int tileRow = Math.floorDiv(worldY, Common.TILE_SIZE);
+
         int chunkX = tileCol / chunkSize;
         int chunkY = tileRow / chunkSize;
         int inChunkCol = tileCol % chunkSize;
         int inChunkRow = tileRow % chunkSize;
+
+        if (chunkX >= Common.MAX_CHUNK_X || chunkY >= Common.MAX_CHUNK_Y) return true;
 
         String key = chunkX + "_" + chunkY;
         Chunk c = loadedChunks.get(key);
         if (c == null) return false;
 
         int tileNum = c.mapTileNum[inChunkRow][inChunkCol];
-        if (tiles != null && tileNum >= 0 && tileNum < tiles.length) {
-            return tiles[tileNum].collision;
-        }
-        return false;
+        return tileNum >= 0 && collisionTiles.contains(tileNum);
     }
 
     public void draw(Graphics2D g2, int focusWorldX, int focusWorldY, int screenWidth, int screenHeight) {

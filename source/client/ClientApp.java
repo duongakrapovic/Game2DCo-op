@@ -2,68 +2,28 @@ package source.client;
 
 import source.common.Common;
 import source.common.MapManager;
-import source.common.PhysicsEngine;
-import source.common.Player;
 
-import javax.imageio.ImageIO;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
-import java.io.*;
-import java.net.Socket;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.io.File;
+import java.io.IOException;
 
-public class ClientApp extends JFrame {
+public class ClientApp extends JFrame implements ClientNetwork.NetworkListener {
 
-    // Lớp chứa dữ liệu đồng bộ để hiển thị Player lên màn hình
-    public static class RenderPlayer {
-        public String name;
-        public int x, y;
-        public String direction = "down"; // "up", "down", "left", "right"
-        public int spriteNum = 1;        // 1 hoặc 2
-
-        public RenderPlayer(String name, int x, int y, String direction, int spriteNum) {
-            this.name = name;
-            this.x = x;
-            this.y = y;
-            this.direction = direction;
-            this.spriteNum = spriteNum;
-        }
-    }
-
-    // Quản lý sprite động bằng Map<Direction, Image[]>
-    private final Map<String, Image[]> spriteMap = new HashMap<>();
-
-    // Danh sách người chơi hiển thị (Thread-safe)
-    private final Map<String, RenderPlayer> renderPlayers = new ConcurrentHashMap<>();
-    private String myName = "Player_" + (int) (Math.random() * 100);
-
-    // Network I/O
-    private Socket socket;
-    private PrintWriter out;
-    private BufferedReader in;
-    private Thread netListenThread;
-
-    // Trạng thái phím điều khiển
-    private boolean left = false, right = false, up = false, down = false;
-
-    // Map Manager
+    private String myName = "Player_" + (int)(Math.random() * 100);
     private final MapManager mapManager;
+    private final ClientNetwork network;
+    private final GamePanel gamePanel;
 
-    // Chế độ Offline Test (Dedicated Thread + DeltaTime)
-    private boolean isOfflineMode = false;
-    private Player localPlayer;
-    private Thread localGameThread;
-    private volatile boolean isLocalRunning = false;
-
-    // Giao diện và chuyển cảnh (CardLayout)
     private final CardLayout cardLayout = new CardLayout();
     private final JPanel mainContainer = new JPanel(cardLayout);
+    
     private final DefaultListModel<String> roomListModel = new DefaultListModel<>();
     private final JList<String> roomJList = new JList<>(roomListModel);
-    private final GamePanel gamePanel;
+    private JTextField txtCreateRoomName;
+    private JTextField txtPlayerNameLobby;
+    private JTextField txtServerIp;
 
     public ClientApp() {
         setTitle("Dungeon Co-op Game");
@@ -71,413 +31,293 @@ public class ClientApp extends JFrame {
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
 
-        // 1. Nạp bản đồ từ source/content/map
+        // 1. Nạp Map
         String mapPath = "source/content/map";
         mapManager = new MapManager();
         mapManager.loadTilesetImage(mapPath + "/tileset.png", Common.ORIGINAL_TILE_SIZE);
         mapManager.loadTilesetProperties(mapPath + "/tileset.tsx");
         mapManager.loadAllChunks(mapPath, Common.MAX_CHUNK_X, Common.MAX_CHUNK_Y);
 
-        // 2. Nạp assets (Sprite nhân vật với Map<Direction, Image[]>)
-        loadAssets();
+        // 2. Khởi tạo Module
+        network = new ClientNetwork(this);
+        gamePanel = new GamePanel(mapManager);
 
-        // 3. Khởi tạo các Scene
+        // 3. UI Scenes
         JPanel menuPanel = createMainMenuUI();
         JPanel lobbyPanel = createLobbyUI();
-        gamePanel = new GamePanel();
 
         mainContainer.add(menuPanel, "MENU");
         mainContainer.add(lobbyPanel, "LOBBY");
         mainContainer.add(gamePanel, "GAME");
         add(mainContainer);
 
-        // Mặc định hiển thị Main Menu
         cardLayout.show(mainContainer, "MENU");
-
-        // 4. Lắng nghe phím bấm — Key Bindings chuẩn Swing để tránh mất focus
-        //    Dùng WHEN_IN_FOCUSED_WINDOW: nhận phím khi bất kỳ component nào trong cửa sổ có focus
         setupKeyBindings();
 
-        // Xử lý đóng cửa sổ an toàn
         addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
-                stopLocalGame();
-                disconnectNetwork();
+                gamePanel.stopOfflineMode();
+                network.disconnect();
             }
         });
     }
 
     /**
-     * Nạp sprites nhân vật vào Map<Direction, Image[]>
-     * Rút gọn code từ nhiều biến rời rạc thành vòng lặp tiện lợi.
+     * HÀM TỰ ĐỘNG KHỞI CHẠY FILE RUN-SERVER.BAT NGẦM TRÊN HỆ THỐNG
      */
-    private void loadAssets() {
-        String path = "source/content/player/";
-        String[] directions = {"down", "up", "left", "right"};
+    private void launchServerBatch() {
         try {
-            for (String dir : directions) {
-                Image[] frames = new Image[2];
-                frames[0] = ImageIO.read(new File(path + "boy_" + dir + "_1.png"));
-                frames[1] = ImageIO.read(new File(path + "boy_" + dir + "_2.png"));
-                spriteMap.put(dir, frames);
+            File batFile = new File("run-server.bat");
+            if (batFile.exists()) {
+                ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", "start", "Dungeon Server", "run-server.bat");
+                pb.directory(batFile.getParentFile());
+                pb.start();
+                System.out.println("[ClientApp] Đã tự động kích hoạt file run-server.bat thành công!");
+            } else {
+                System.err.println("[ClientApp] Không tìm thấy file run-server.bat ở thư mục gốc!");
             }
-            System.out.println("[ClientApp] Nạp thành công bộ sprite nhân vật vào spriteMap!");
-        } catch (Exception e) {
-            System.err.println("[ClientApp] Không tìm thấy đủ sprite trong " + path + ": " + e.getMessage());
+        } catch (IOException e) {
+            System.err.println("[ClientApp] Lỗi khi chạy run-server.bat: " + e.getMessage());
         }
     }
 
-    /**
-     * Tạo màn hình Menu chính (Main Scene) với 3 tùy chọn:
-     * - Chơi Offline (Test)
-     * - Chơi Online (Sảnh phòng)
-     * - Thoát Game
-     */
     private JPanel createMainMenuUI() {
-        JPanel menuPanel = new JPanel() {
-            @Override
-            protected void paintComponent(Graphics g) {
-                super.paintComponent(g);
-                Graphics2D g2 = (Graphics2D) g;
-                // Nền gradient tối
-                GradientPaint gp = new GradientPaint(0, 0, new Color(25, 30, 42), 
-                                                     0, getHeight(), new Color(12, 14, 20));
-                g2.setPaint(gp);
-                g2.fillRect(0, 0, getWidth(), getHeight());
-            }
-        };
-        menuPanel.setLayout(new GridBagLayout());
+        JPanel panel = new JPanel(new GridBagLayout());
+        panel.setBackground(new Color(25, 30, 42));
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.insets = new Insets(15, 20, 15, 20);
         gbc.fill = GridBagConstraints.HORIZONTAL;
         gbc.gridx = 0;
 
-        // Tiêu đề Game
-        JLabel lblTitle = new JLabel("DUNGEON CO-OP", SwingConstants.CENTER);
-        lblTitle.setFont(new Font("Arial", Font.BOLD, 42));
-        lblTitle.setForeground(new Color(245, 190, 75));
-        gbc.gridy = 0;
-        menuPanel.add(lblTitle, gbc);
+        JLabel title = new JLabel("DUNGEON CO-OP", SwingConstants.CENTER);
+        title.setFont(new Font("Arial", Font.BOLD, 42));
+        title.setForeground(new Color(245, 190, 75));
+        gbc.gridy = 0; panel.add(title, gbc);
 
-        JLabel lblSub = new JLabel("2D Top-Down Multiplayer Exploration", SwingConstants.CENTER);
-        lblSub.setFont(new Font("Arial", Font.ITALIC, 16));
-        lblSub.setForeground(new Color(180, 185, 200));
-        gbc.gridy = 1;
-        menuPanel.add(lblSub, gbc);
+        JButton btnOffline = createStyledButton("CHOI OFFLINE (KHONG CAN SERVER)");
+        gbc.gridy = 1; panel.add(btnOffline, gbc);
 
-        // Khoảng cách
-        gbc.insets = new Insets(10, 50, 10, 50);
+        JButton btnOnline = createStyledButton("CHOI ONLINE (SANH PHONG)");
+        gbc.gridy = 2; panel.add(btnOnline, gbc);
 
-        // 1. Nút Chơi Offline (Test)
-        JButton btnOffline = createStyledButton("🎮  CHƠI OFFLINE (LUYỆN TẬP / TEST)");
-        gbc.gridy = 2;
-        menuPanel.add(btnOffline, gbc);
+        JButton btnExit = createStyledButton("THOAT GAME");
+        gbc.gridy = 3; panel.add(btnExit, gbc);
 
-        // 2. Nút Chơi Online
-        JButton btnOnline = createStyledButton("🌐  CHƠI ONLINE (SẢNH PHÒNG)");
-        gbc.gridy = 3;
-        menuPanel.add(btnOnline, gbc);
-
-        // 3. Nút Thoát Game
-        JButton btnExit = createStyledButton("🚪  THOÁT GAME");
-        gbc.gridy = 4;
-        menuPanel.add(btnExit, gbc);
-
-        // Sự kiện các nút
-        btnOffline.addActionListener(e -> startLocalGame());
+        btnOffline.addActionListener(e -> {
+            gamePanel.stopOfflineMode();
+            network.disconnect();
+            setTitle("Dungeon Co-op [OFFLINE]");
+            gamePanel.startOfflineMode(myName);
+            cardLayout.show(mainContainer, "GAME");
+            gamePanel.requestFocusInWindow();
+        });
 
         btnOnline.addActionListener(e -> {
-            String host = JOptionPane.showInputDialog(this, "Nhập IP Server:", "localhost");
-            if (host == null || host.trim().isEmpty()) return;
-
-            String nameInput = JOptionPane.showInputDialog(this, "Nhập Tên người chơi:", myName);
-            if (nameInput != null && !nameInput.trim().isEmpty()) {
-                myName = nameInput.trim();
-            }
-
-            connectToServer(host.trim());
+            cardLayout.show(mainContainer, "LOBBY");
         });
 
-        btnExit.addActionListener(e -> {
-            stopLocalGame();
-            disconnectNetwork();
-            System.exit(0);
-        });
-
-        return menuPanel;
+        btnExit.addActionListener(e -> System.exit(0));
+        return panel;
     }
 
-    /**
-     * Tạo nút bấm có phong cách hiện đại
-     */
     private JButton createStyledButton(String text) {
         JButton btn = new JButton(text);
-        btn.setFont(new Font("Arial", Font.BOLD, 17));
-        btn.setPreferredSize(new Dimension(380, 50));
-        btn.setFocusPainted(false);
+        btn.setFont(new Font("Arial", Font.BOLD, 16));
+        btn.setPreferredSize(new Dimension(350, 45));
         btn.setBackground(new Color(45, 52, 70));
         btn.setForeground(Color.WHITE);
-        btn.setCursor(new Cursor(Cursor.HAND_CURSOR));
-        btn.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(new Color(80, 95, 125), 2),
-            BorderFactory.createEmptyBorder(8, 15, 8, 15)
-        ));
-
-        btn.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mouseEntered(MouseEvent e) {
-                btn.setBackground(new Color(65, 78, 105));
-            }
-            @Override
-            public void mouseExited(MouseEvent e) {
-                btn.setBackground(new Color(45, 52, 70));
-            }
-        });
+        btn.setFocusPainted(false);
         return btn;
     }
 
-    /**
-     * Giao diện Sảnh chờ (Lobby UI)
-     */
     private JPanel createLobbyUI() {
         JPanel panel = new JPanel(new BorderLayout(10, 10));
         panel.setBorder(BorderFactory.createEmptyBorder(20, 20, 20, 20));
         panel.setBackground(new Color(24, 28, 38));
 
-        JPanel topBar = new JPanel(new BorderLayout());
+        JPanel topBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 5));
         topBar.setOpaque(false);
-
-        JButton btnBack = new JButton("⬅ Quay lại Menu");
-        btnBack.setFocusPainted(false);
+        JButton btnBack = new JButton("Quay lại Menu");
         btnBack.addActionListener(e -> {
-            disconnectNetwork();
-            setTitle("Dungeon Co-op Game");
+            network.disconnect();
             cardLayout.show(mainContainer, "MENU");
         });
-        topBar.add(btnBack, BorderLayout.WEST);
+        topBar.add(btnBack);
 
-        JLabel title = new JLabel("SẢNH CHỜ PHÒNG CHƠI", SwingConstants.CENTER);
-        title.setFont(new Font("Arial", Font.BOLD, 22));
-        title.setForeground(Color.WHITE);
-        topBar.add(title, BorderLayout.CENTER);
+        topBar.add(new JLabel("<html><font color='white'>IP Server:</font></html>"));
+        txtServerIp = new JTextField("localhost", 12);
+        topBar.add(txtServerIp);
+
+        JButton btnConnect = new JButton("Kết nối Server");
+        btnConnect.addActionListener(e -> {
+            String ip = txtServerIp.getText().trim();
+            if (network.connect(ip)) {
+                network.sendTcp(Common.CMD_ROOM_LIST);
+                JOptionPane.showMessageDialog(this, "Kết nối Server thành công!");
+            } else {
+                JOptionPane.showMessageDialog(this, "Không thể kết nối Server! (Bạn có thể bấm Tạo phòng để tự chạy Server)", "Thông báo", JOptionPane.WARNING_MESSAGE);
+            }
+        });
+        topBar.add(btnConnect);
         panel.add(topBar, BorderLayout.NORTH);
+
+        JPanel centerSplit = new JPanel(new GridLayout(1, 2, 20, 0));
+        centerSplit.setOpaque(false);
+
+        // CỘT TRÁI: DANH SÁCH PHÒNG
+        JPanel leftCol = new JPanel(new BorderLayout(5, 5));
+        leftCol.setOpaque(false);
+        JLabel lblLeftTitle = new JLabel("<html><font color='white'><b>DANH SÁCH PHÒNG ĐANG HOẠT ĐỘNG</b></font></html>");
+        leftCol.add(lblLeftTitle, BorderLayout.NORTH);
 
         roomJList.setBackground(new Color(35, 40, 55));
         roomJList.setForeground(Color.WHITE);
-        roomJList.setFont(new Font("Arial", Font.PLAIN, 16));
-        panel.add(new JScrollPane(roomJList), BorderLayout.CENTER);
+        roomJList.setFont(new Font("Arial", Font.PLAIN, 14));
+        leftCol.add(new JScrollPane(roomJList), BorderLayout.CENTER);
 
-        JPanel btnPanel = new JPanel(new GridLayout(1, 3, 10, 10));
-        btnPanel.setOpaque(false);
-        JButton btnRefresh = new JButton("Làm mới danh sách");
-        JButton btnCreate  = new JButton("Tạo phòng mới");
-        JButton btnJoin    = new JButton("Vào phòng đã chọn");
+        JButton btnJoin = new JButton("Vào phòng đã chọn");
+        btnJoin.setFont(new Font("Arial", Font.BOLD, 14));
+        btnJoin.addActionListener(e -> joinSelectedRoom());
+        leftCol.add(btnJoin, BorderLayout.SOUTH);
 
-        btnPanel.add(btnRefresh);
-        btnPanel.add(btnCreate);
-        btnPanel.add(btnJoin);
-        panel.add(btnPanel, BorderLayout.SOUTH);
+        centerSplit.add(leftCol);
 
-        btnRefresh.addActionListener(e -> { 
-            if (out != null) out.println(Common.CMD_ROOM_LIST); 
-        });
+        // CỘT PHẢI: TẠO PHÒNG
+        JPanel rightCol = new JPanel(new GridBagLayout());
+        rightCol.setOpaque(false);
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(10, 10, 10, 10);
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.gridx = 0;
 
-        btnCreate.addActionListener(e -> {
-            String rName = JOptionPane.showInputDialog(this, "Nhập tên phòng:");
-            if (rName != null && !rName.trim().isEmpty()) {
-                if (out != null) {
-                    out.println(Common.CMD_CREATE_ROOM + ":" + rName.trim() + ":" + myName);
-                    cardLayout.show(mainContainer, "GAME");
-                    gamePanel.requestFocusInWindow();
-                }
-            }
-        });
+        JLabel lblRightTitle = new JLabel("<html><font color='white'><b>TẠO PHÒNG MỚI (TỰ KHỞI CHẠY SERVER)</b></font></html>");
+        gbc.gridy = 0; rightCol.add(lblRightTitle, gbc);
 
-        btnJoin.addActionListener(e -> {
-            String selected = roomJList.getSelectedValue();
-            if (selected != null) {
-                String rName = selected.split(" ")[0];
-                if (out != null) {
-                    out.println(Common.CMD_JOIN_ROOM + ":" + rName + ":" + myName);
-                    cardLayout.show(mainContainer, "GAME");
-                    gamePanel.requestFocusInWindow();
-                }
+        JLabel lbl1 = new JLabel("<html><font color='white'>Tên người chơi:</font></html>");
+        gbc.gridy = 1; rightCol.add(lbl1, gbc);
+        txtPlayerNameLobby = new JTextField(myName);
+        gbc.gridy = 2; rightCol.add(txtPlayerNameLobby, gbc);
+
+        JLabel lbl2 = new JLabel("<html><font color='white'>Tên phòng muốn tạo:</font></html>");
+        gbc.gridy = 3; rightCol.add(lbl2, gbc);
+        txtCreateRoomName = new JTextField("Room_1");
+        gbc.gridy = 4; rightCol.add(txtCreateRoomName, gbc);
+
+        JButton btnCreate = new JButton("Tạo phòng & Chạy Server (Enter)");
+        btnCreate.setFont(new Font("Arial", Font.BOLD, 14));
+        btnCreate.setBackground(new Color(60, 140, 60));
+        btnCreate.setForeground(Color.WHITE);
+        gbc.gridy = 5; rightCol.add(btnCreate, gbc);
+
+        ActionListener createAction = e -> createNewRoom();
+        btnCreate.addActionListener(createAction);
+        txtCreateRoomName.addActionListener(createAction);
+        txtPlayerNameLobby.addActionListener(createAction);
+
+        centerSplit.add(rightCol);
+        panel.add(centerSplit, BorderLayout.CENTER);
+
+        JPanel bottomBar = new JPanel(new FlowLayout(FlowLayout.CENTER));
+        bottomBar.setOpaque(false);
+        JButton btnRefresh = new JButton("Làm mới danh sách phòng");
+        btnRefresh.addActionListener(e -> {
+            if (network.isConnected()) {
+                network.sendTcp(Common.CMD_ROOM_LIST);
             } else {
-                JOptionPane.showMessageDialog(this, "Vui lòng chọn 1 phòng trong danh sách!");
+                JOptionPane.showMessageDialog(this, "Chưa kết nối Server!");
             }
         });
+        bottomBar.add(btnRefresh);
+        panel.add(bottomBar, BorderLayout.SOUTH);
 
         return panel;
     }
 
-    /**
-     * Bắt đầu chế độ Local Offline bằng Dedicated Thread và DeltaTime (Fixed Timestep)
-     */
-    public synchronized void startLocalGame() {
-        stopLocalGame();
-        disconnectNetwork();
+    private void createNewRoom() {
+        String rName = txtCreateRoomName.getText().trim();
+        String pName = txtPlayerNameLobby.getText().trim();
+        if(!pName.isEmpty()) myName = pName;
 
-        isOfflineMode = true;
-        setTitle("Dungeon Co-op Game [OFFLINE TEST]");
+        if (rName.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Vui lòng nhập tên phòng!");
+            return;
+        }
 
-        localPlayer = new Player("LOCAL_1", myName);
-        renderPlayers.clear();
-        renderPlayers.put("LOCAL_1", new RenderPlayer(
-            myName, 
-            (int) localPlayer.x, 
-            (int) localPlayer.y, 
-            localPlayer.direction, 
-            localPlayer.spriteNum
-        ));
+        if (!network.isConnected()) {
+            launchServerBatch();
+            try {
+                Thread.sleep(3000);
+            } catch (InterruptedException ignored) {}
 
-        isLocalRunning = true;
-        localGameThread = new Thread(() -> {
-            final double TARGET_FPS = 60.0;
-            final double OPTIMAL_NS = 1_000_000_000.0 / TARGET_FPS;
-            long lastTime = System.nanoTime();
-
-            while (isLocalRunning) {
-                long now = System.nanoTime();
-                long updateLength = now - lastTime;
-                lastTime = now;
-                float dt = (float) (updateLength / 1_000_000_000.0);
-
-                // Giới hạn max dt tránh lỗi vật lý khi bị lag khung hình
-                if (dt > 0.1f) dt = 0.1f;
-
-                // 1. Cập nhật phím bấm vào Player
-                localPlayer.left  = left;
-                localPlayer.right = right;
-                localPlayer.up    = up;
-                localPlayer.down  = down;
-
-                // 2. Tính toán vật lý và animation bước chân qua PhysicsEngine trong common
-                PhysicsEngine.updatePlayer(localPlayer, mapManager, dt);
-
-                // 3. Cập nhật trạng thái hiển thị
-                renderPlayers.put("LOCAL_1", new RenderPlayer(
-                    myName, 
-                    (int) localPlayer.x, 
-                    (int) localPlayer.y, 
-                    localPlayer.direction, 
-                    localPlayer.spriteNum
-                ));
-
-                // 4. Yêu cầu vẽ lại trên Event Dispatch Thread
-                gamePanel.repaint();
-
-                // 5. Đồng bộ FPS mục tiêu (~60 FPS)
-                long sleepTimeMs = (long) ((lastTime - System.nanoTime() + OPTIMAL_NS) / 1_000_000.0);
-                if (sleepTimeMs > 0) {
-                    try {
-                        Thread.sleep(sleepTimeMs);
-                    } catch (InterruptedException ignored) {
-                        break;
-                    }
-                } else {
-                    Thread.yield();
-                }
+            String ip = txtServerIp.getText().trim();
+            if (!network.connect(ip)) {
+                JOptionPane.showMessageDialog(this, "Không thể tự khởi động hoặc kết nối tới Server!", "Lỗi", JOptionPane.ERROR_MESSAGE);
+                return;
             }
-        }, "Local-GameLoop-Thread");
+        }
 
-        localGameThread.start();
+        network.sendTcp(Common.CMD_CREATE_ROOM + ":" + rName + ":" + myName);
         cardLayout.show(mainContainer, "GAME");
         gamePanel.requestFocusInWindow();
     }
 
-    /**
-     * Dừng chế độ Local game loop
-     */
-    public synchronized void stopLocalGame() {
-        isLocalRunning = false;
-        if (localGameThread != null) {
-            localGameThread.interrupt();
-            try {
-                localGameThread.join(250);
-            } catch (InterruptedException ignored) {}
-            localGameThread = null;
+    private void joinSelectedRoom() {
+        String selected = roomJList.getSelectedValue();
+        String pName = txtPlayerNameLobby.getText().trim();
+        if(!pName.isEmpty()) myName = pName;
+
+        if (selected == null || selected.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Vui lòng chọn 1 phòng trong danh sách!");
+            return;
         }
+        if (!network.isConnected()) {
+            JOptionPane.showMessageDialog(this, "Bạn chưa kết nối tới Server! Hãy bấm Kết nối Server trước.");
+            return;
+        }
+
+        String rName = selected.split(" ")[0];
+        network.sendTcp(Common.CMD_JOIN_ROOM + ":" + rName + ":" + myName);
+        cardLayout.show(mainContainer, "GAME");
+        gamePanel.requestFocusInWindow();
     }
 
-    /**
-     * Kết nối mạng tới Server Online
-     */
-    private void connectToServer(String host) {
-        stopLocalGame();
-        disconnectNetwork();
+    private void setupKeyBindings() {
+        int[][] keys = {
+            {KeyEvent.VK_W, KeyEvent.VK_UP}, 
+            {KeyEvent.VK_S, KeyEvent.VK_DOWN}, 
+            {KeyEvent.VK_A, KeyEvent.VK_LEFT}, 
+            {KeyEvent.VK_D, KeyEvent.VK_RIGHT},
+            {KeyEvent.VK_ESCAPE, -1}
+        };
+        String[] names = {"up", "down", "left", "right", "esc"};
+        int cond = JComponent.WHEN_IN_FOCUSED_WINDOW;
 
-        isOfflineMode = false;
-        setTitle("Dungeon Co-op Game [ONLINE - " + host + "]");
-
-        try {
-            socket = new Socket(host, Common.PORT);
-            out = new PrintWriter(socket.getOutputStream(), true);
-            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-
-            netListenThread = new Thread(() -> {
-                try {
-                    String line;
-                    while ((line = in.readLine()) != null) {
-                        if (line.startsWith(Common.CMD_ROOM_LIST)) {
-                            String[] items = line.split(";");
-                            SwingUtilities.invokeLater(() -> {
-                                roomListModel.clear();
-                                for (int i = 1; i < items.length; i++) {
-                                    roomListModel.addElement(items[i]);
-                                }
-                            });
-                        } else if (line.startsWith(Common.CMD_STATE)) {
-                            String[] items = line.split(";");
-                            Map<String, RenderPlayer> tempMap = new HashMap<>();
-                            for (int i = 1; i < items.length; i++) {
-                                String[] pData = items[i].split(",");
-                                if (pData.length >= 6) {
-                                    tempMap.put(pData[0], new RenderPlayer(
-                                        pData[1], 
-                                        Integer.parseInt(pData[2]), 
-                                        Integer.parseInt(pData[3]), 
-                                        pData[4], 
-                                        Integer.parseInt(pData[5])
-                                    ));
-                                }
-                            }
-                            // Cập nhật lên UI an toàn trên luồng Swing EDT
-                            SwingUtilities.invokeLater(() -> {
-                                renderPlayers.clear();
-                                renderPlayers.putAll(tempMap);
-                                gamePanel.repaint();
-                            });
-                        } else if (line.startsWith(Common.CMD_ERROR)) {
-                            String errorMsg = line.split(":")[1];
-                            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, errorMsg));
-                        }
+        for (int i = 0; i < names.length; i++) {
+            final String n = names[i];
+            int p = keys[i][0], a = keys[i][1];
+            
+            if ("esc".equals(n)) {
+                gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(p, 0, false), n + "_p");
+                gamePanel.getActionMap().put(n + "_p", new AbstractAction() {
+                    @Override public void actionPerformed(java.awt.event.ActionEvent e) {
+                        handleEscapeKey();
                     }
-                } catch (Exception ignored) {
-                } finally {
-                    disconnectNetwork();
-                }
-            }, "Client-Net-Listen-Thread");
+                });
+            } else {
+                gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(p, 0, false), n + "_p");
+                if (a != -1) gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(a, 0, false), n + "_p");
+                gamePanel.getActionMap().put(n + "_p", new AbstractAction() {
+                    @Override public void actionPerformed(java.awt.event.ActionEvent e) { updateKey(n, true); }
+                });
 
-            netListenThread.start();
-            out.println(Common.CMD_ROOM_LIST);
-            cardLayout.show(mainContainer, "LOBBY");
-
-        } catch (IOException ex) {
-            JOptionPane.showMessageDialog(this, "Không thể kết nối tới Server: " + ex.getMessage());
-            cardLayout.show(mainContainer, "MENU");
+                gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(p, 0, true), n + "_r");
+                if (a != -1) gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(a, 0, true), n + "_r");
+                gamePanel.getActionMap().put(n + "_r", new AbstractAction() {
+                    @Override public void actionPerformed(java.awt.event.ActionEvent e) { updateKey(n, false); }
+                });
+            }
         }
-    }
-
-    private void disconnectNetwork() {
-        try {
-            if (socket != null && !socket.isClosed()) socket.close();
-            if (out != null) out.close();
-            if (in != null) in.close();
-        } catch (IOException ignored) {}
-        socket = null;
-        out = null;
-        in = null;
     }
 
     private void handleEscapeKey() {
@@ -488,163 +328,50 @@ public class ClientApp extends JFrame {
             JOptionPane.YES_NO_OPTION
         );
         if (opt == JOptionPane.YES_OPTION) {
-            stopLocalGame();
-            disconnectNetwork();
+            gamePanel.stopOfflineMode();
+            network.disconnect();
             setTitle("Dungeon Co-op Game");
             cardLayout.show(mainContainer, "MENU");
         }
     }
 
-    /**
-     * Đăng ký Key Bindings dùng WHEN_IN_FOCUSED_WINDOW trên gamePanel.
-     * Khác với KeyListener, Key Bindings hoạt động đúng bất kể focus nằm ở component nào trong cửa sổ.
-     */
-    private void setupKeyBindings() {
-        int[][] keys = {
-            {KeyEvent.VK_W,     KeyEvent.VK_UP},
-            {KeyEvent.VK_S,     KeyEvent.VK_DOWN},
-            {KeyEvent.VK_A,     KeyEvent.VK_LEFT},
-            {KeyEvent.VK_D,     KeyEvent.VK_RIGHT},
-            {KeyEvent.VK_ESCAPE, -1}
-        };
-        String[] names = {"up", "down", "left", "right", "esc"};
-        int condition = JComponent.WHEN_IN_FOCUSED_WINDOW;
-
-        for (int i = 0; i < names.length; i++) {
-            final String name = names[i];
-            int primaryKey = keys[i][0];
-            int altKey     = keys[i][1];
-
-            // --- PRESSED ---
-            gamePanel.getInputMap(condition).put(KeyStroke.getKeyStroke(primaryKey, 0, false), name + "_pressed");
-            if (altKey != -1)
-                gamePanel.getInputMap(condition).put(KeyStroke.getKeyStroke(altKey, 0, false), name + "_pressed");
-
-            gamePanel.getActionMap().put(name + "_pressed", new javax.swing.AbstractAction() {
-                @Override public void actionPerformed(java.awt.event.ActionEvent e) {
-                    if ("esc".equals(name)) {
-                        handleEscapeKey();
-                    } else {
-                        updateKey(name, true);
-                    }
-                }
-            });
-
-            // --- RELEASED ---
-            if (!"esc".equals(name)) {
-                gamePanel.getInputMap(condition).put(KeyStroke.getKeyStroke(primaryKey, 0, true), name + "_released");
-                if (altKey != -1)
-                    gamePanel.getInputMap(condition).put(KeyStroke.getKeyStroke(altKey, 0, true), name + "_released");
-
-                gamePanel.getActionMap().put(name + "_released", new javax.swing.AbstractAction() {
-                    @Override public void actionPerformed(java.awt.event.ActionEvent e) {
-                        updateKey(name, false);
-                    }
-                });
-            }
-        }
-    }
-
-    /** Phiên bản updateKey nhận tên hướng thay vì keyCode (dùng cho Key Bindings) */
-    private void updateKey(String dir, boolean isPressed) {
+    private void updateKey(String dir, boolean pressed) {
         switch (dir) {
-            case "left":  left  = isPressed; break;
-            case "right": right = isPressed; break;
-            case "up":    up    = isPressed; break;
-            case "down":  down  = isPressed; break;
+            case "left": gamePanel.left = pressed; break;
+            case "right": gamePanel.right = pressed; break;
+            case "up": gamePanel.up = pressed; break;
+            case "down": gamePanel.down = pressed; break;
         }
-        if (!isOfflineMode && out != null) {
-            out.println(Common.CMD_INPUT + ":" + left + ":" + right + ":" + up + ":" + down);
-        }
-    }
-
-    private void updateKey(int keyCode, boolean isPressed) {
-        if (keyCode == KeyEvent.VK_A || keyCode == KeyEvent.VK_LEFT)  left  = isPressed;
-        if (keyCode == KeyEvent.VK_D || keyCode == KeyEvent.VK_RIGHT) right = isPressed;
-        if (keyCode == KeyEvent.VK_W || keyCode == KeyEvent.VK_UP)    up    = isPressed;
-        if (keyCode == KeyEvent.VK_S || keyCode == KeyEvent.VK_DOWN)  down  = isPressed;
-
-        if (!isOfflineMode && out != null) {
-            // Gửi dữ liệu điều khiển lên Server khi ở chế độ Online
-            out.println(Common.CMD_INPUT + ":" + left + ":" + right + ":" + up + ":" + down);
+        // Gửi trạng thái phím qua TCP thuần ngay khi có thay đổi
+        if (network.isConnected()) {
+            network.sendTcp(Common.CMD_INPUT + ":" + gamePanel.left + ":" + gamePanel.right + ":" + gamePanel.up + ":" + gamePanel.down);
         }
     }
 
-    private class GamePanel extends JPanel {
-        public GamePanel() {
-            setFocusable(true);
-        }
+    // --- NETWORK LISTENER CALLBACKS ---
+    @Override public void onRoomListReceived(String line) {
+        String[] items = line.split(";");
+        SwingUtilities.invokeLater(() -> {
+            roomListModel.clear();
+            for (int i = 1; i < items.length; i++) roomListModel.addElement(items[i]);
+        });
+    }
 
-        @Override
-        protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            Graphics2D g2 = (Graphics2D) g;
+    @Override public void onStateReceived(String line) {
+        gamePanel.updateOnlinePlayers(line, myName);
+    }
 
-            int myX = (int) Common.SPAWN_X;
-            int myY = (int) Common.SPAWN_Y;
+    @Override public void onErrorReceived(String err) {
+        SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, err));
+    }
 
-            for (RenderPlayer p : renderPlayers.values()) {
-                if (p.name.equals(myName)) {
-                    myX = p.x;
-                    myY = p.y;
-                    break;
-                }
-            }
-
-            // 1. Vẽ Map và tự động khóa biên Camera
-            mapManager.draw(g2, myX, myY, getWidth(), getHeight());
-
-            // 2. Tính vị trí Camera thực tế để vẽ Player
-            int totalMapWidth = Common.MAX_CHUNK_X * Common.CHUNK_SIZE * Common.TILE_SIZE;
-            int totalMapHeight = Common.MAX_CHUNK_Y * Common.CHUNK_SIZE * Common.TILE_SIZE;
-
-            int camX = myX - getWidth() / 2;
-            int camY = myY - getHeight() / 2;
-
-            if (totalMapWidth > getWidth()) {
-                camX = Math.max(0, Math.min(camX, totalMapWidth - getWidth()));
-            }
-            if (totalMapHeight > getHeight()) {
-                camY = Math.max(0, Math.min(camY, totalMapHeight - getHeight()));
-            }
-
-            int playerRenderSize = (int) (16 * Common.SCALE); // Kích thước hiển thị nhân vật
-
-            for (RenderPlayer p : renderPlayers.values()) {
-                int screenX = p.x - camX;
-                int screenY = p.y - camY;
-
-                // Lấy ảnh sprite từ Map<Direction, Image[]>
-                Image[] frames = spriteMap.get(p.direction);
-                Image currentSprite = null;
-                if (frames != null && frames.length > 0) {
-                    int frameIdx = (p.spriteNum == 2 && frames.length > 1) ? 1 : 0;
-                    currentSprite = frames[frameIdx];
-                }
-
-                if (currentSprite != null) {
-                    g2.drawImage(currentSprite, screenX, screenY, playerRenderSize, playerRenderSize, null);
-                } else {
-                    g2.setColor(p.name.equals(myName) ? Color.CYAN : Color.GREEN);
-                    g2.fillRect(screenX, screenY, playerRenderSize, playerRenderSize);
-                }
-
-                g2.setColor(Color.WHITE);
-                g2.setFont(new Font("Arial", Font.PLAIN, 12));
-                g2.drawString(p.name, screenX - 5, screenY - 5);
-            }
-        }
+    @Override 
+    public void onDisconnected() {
+        gamePanel.stopOfflineMode();
+        SwingUtilities.invokeLater(() -> cardLayout.show(mainContainer, "MENU"));
     }
 
     public static void main(String[] args) {
-        SwingUtilities.invokeLater(() -> {
-            ClientApp app = new ClientApp();
-            app.setVisible(true);
-
-            // Hỗ trợ tham số dòng lệnh cho developer test nhanh: --offline
-            if (args != null && args.length > 0 && args[0].equalsIgnoreCase("--offline")) {
-                app.startLocalGame();
-            }
-        });
+        SwingUtilities.invokeLater(() -> new ClientApp().setVisible(true));
     }
 }

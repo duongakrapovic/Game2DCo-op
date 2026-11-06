@@ -1,107 +1,74 @@
 package source.server;
 
 import source.common.Common;
-import source.common.Player;
-import java.io.*;
-import java.net.*;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * ============================================================================
+ * SERVER APP (SOURCE/SERVER/SERVERAPP.JAVA)
+ * ============================================================================
+ * Entry Point khởi tạo Headless Game Server chạy hoàn toàn bằng TCP Thuần.
+ * ============================================================================
+ */
 public class ServerApp {
-    private static final Map<String, GameRoom> rooms = new ConcurrentHashMap<>();
-    
-    @SuppressWarnings("resource")
-    public static void main(String[] args) throws Exception {
-        ServerSocket serverSocket = new ServerSocket(Common.PORT);
-        System.out.println("Dedicated Server Online on Port: " + Common.PORT);
 
-        int pCounter = 1;
-        while (true) {
-            Socket socket = serverSocket.accept();
-            String pId = "P" + (pCounter++);
-            new Thread(new ClientHandler(socket, pId)).start();
+    private final Map<String, GameRoom> rooms = new ConcurrentHashMap<>();
+    private TcpLobbyServer tcpLobby;
+
+    public static void main(String[] args) {
+        ServerApp app = new ServerApp();
+        app.start();
+    }
+
+    public void start() {
+        System.out.println("==================================================");
+        System.out.println("   DUNGEON CO-OP HEADLESS GAME SERVER (TCP)       ");
+        System.out.println("==================================================");
+
+        try {
+            tcpLobby = new TcpLobbyServer(Common.TCP_PORT, this);
+            tcpLobby.start();
+            System.out.println("[ServerApp] TCP Server da mo tai Port: " + Common.TCP_PORT);
+            System.out.println("[ServerApp] Server da san sang phuc vu! (Go 'exit' de dung)");
+
+            BufferedReader console = new BufferedReader(new InputStreamReader(System.in));
+            String line;
+            while ((line = console.readLine()) != null) {
+                if ("exit".equalsIgnoreCase(line.trim())) {
+                    shutdown();
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("[ServerApp] Loi khoi tao Server: " + e.getMessage());
+            shutdown();
         }
     }
 
-    private static class ClientHandler implements Runnable {
-        private Socket socket;
-        private String pId;
-        private GameRoom currentRoom = null;
-
-        public ClientHandler(Socket socket, String pId) {
-            this.socket = socket;
-            this.pId = pId;
+    public synchronized void shutdown() {
+        System.out.println("[ServerApp] Dang dong Server...");
+        if (tcpLobby != null) tcpLobby.stop();
+        for (GameRoom room : rooms.values()) {
+            room.stop();
         }
+        rooms.clear();
+        System.out.println("[ServerApp] Da tat Server hoan toan.");
+        System.exit(0);
+    }
 
-        @Override
-        public void run() {
-            try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                 PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
+    public Map<String, GameRoom> getRooms() { return rooms; }
+    public GameRoom getRoom(String roomId) { return rooms.get(roomId); }
+    public void addRoom(GameRoom room) { rooms.put(room.getRoomId(), room); }
+    public void removeRoom(String roomId) { rooms.remove(roomId); }
 
-                sendRoomList(out);
-
-                String line;
-                while ((line = in.readLine()) != null) {
-                    String[] parts = line.split(":");
-                    String cmd = parts[0];
-
-                    if (cmd.equals(Common.CMD_CREATE_ROOM)) {
-                        String roomName = parts[1];
-                        String playerName = parts[2];
-
-                        if (rooms.containsKey(roomName)) {
-                            out.println(Common.CMD_ERROR + ":Phòng đã tồn tại!");
-                        } else {
-                            GameRoom newRoom = new GameRoom(roomName);
-                            rooms.put(roomName, newRoom);
-                            Player p = new Player(pId, playerName);
-                            newRoom.addPlayer(pId, p, out);
-                            currentRoom = newRoom;
-                        }
-                    } else if (cmd.equals(Common.CMD_JOIN_ROOM)) {
-                        String roomName = parts[1];
-                        String playerName = parts[2];
-
-                        if (!rooms.containsKey(roomName)) {
-                            out.println(Common.CMD_ERROR + ":Phòng không tồn tại!");
-                        } else {
-                            GameRoom room = rooms.get(roomName);
-                            Player p = new Player(pId, playerName);
-                            room.addPlayer(pId, p, out);
-                            currentRoom = room;
-                        }
-                    } else if (cmd.equals(Common.CMD_INPUT) && currentRoom != null) {
-                        Player p = currentRoom.players.get(pId);
-                        if (p != null && parts.length >= 5) {
-                            p.left  = Boolean.parseBoolean(parts[1]);
-                            p.right = Boolean.parseBoolean(parts[2]);
-                            p.up    = Boolean.parseBoolean(parts[3]);
-                            p.down  = Boolean.parseBoolean(parts[4]);
-                        }
-                    } else if (cmd.equals(Common.CMD_ROOM_LIST)) {
-                        sendRoomList(out);
-                    }
-                }
-            } catch (IOException e) {
-                System.out.println("Client disconnected: " + pId);
-            } finally {
-                if (currentRoom != null) {
-                    currentRoom.removePlayer(pId);
-                    if (currentRoom.players.isEmpty()) {
-                        currentRoom.stopRoom(); // <--- Bổ sung dòng này để dừng luồng phòng
-                        rooms.remove(currentRoom.roomName);
-                        System.out.println("[Server] Da giai phong phong: " + currentRoom.roomName);
-                    }
-                }
-            }
+    public String getRoomListMessage() {
+        StringBuilder sb = new StringBuilder(Common.CMD_ROOM_LIST);
+        for (GameRoom r : rooms.values()) {
+            sb.append(";").append(r.getRoomId()).append(" (").append(r.getPlayerCount()).append("/").append(Common.MAX_PLAYERS_PER_ROOM).append(")");
         }
-
-        private void sendRoomList(PrintWriter out) {
-            StringBuilder sb = new StringBuilder(Common.CMD_ROOM_LIST);
-            for (String rName : rooms.keySet()) {
-                sb.append(";").append(rName).append(" (").append(rooms.get(rName).players.size()).append(" người)");
-            }
-            out.println(sb.toString());
-        }
+        return sb.toString();
     }
 }
