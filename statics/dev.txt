@@ -68,9 +68,28 @@ game play 2.5D , khám phá bản đồ .
     - Mặc định khởi động vào màn hình MENU (CardLayout: MENU / LOBBY / GAME)
     - Nền gradient tối phong cách Dungeon, tiêu đề "DUNGEON CO-OP"
     - 3 nút lựa chọn rõ ràng:
-        🎮 Chơi Offline (Luyện tập / Test)   -> startLocalGame()
-        🌐 Chơi Online (Sảnh phòng)           -> connectToServer(host)
-        🚪 Thoát Game                          -> System.exit(0)
+        Chơi Offline (Luyện tập / Test)   -> startLocalGame()
+        Chơi Online (Sảnh phòng)           -> connectToServer(host)
+        Thoát Game                          -> System.exit(0)
     - Nút "⬅ Quay lại Menu" trong Lobby để ngắt kết nối an toàn
     - Phím ESC trong Game hiện hộp thoại xác nhận quay về Menu
-    - Hỗ trợ CLI flag: java -cp . source.client.ClientApp --offline
+    - Hỗ trợ CLI flag: java -cp . source.client.ClientApp --offline
+----------------------------------------------------------------------------------------
+4/11
+[1] Sửa lỗi va chạm vùng tọa độ âm source/common/MapManager.java 
+isCollisionAtWorld(int worldX, int worldY)
+
+[2] Thêm volatile để giảm độ trễ điều khiển nút bấm 
+source/common/Player.java
+
+[3] Dừng Thread ngầm khi phòng chơi trống (Sửa Thread Leak) 
+Gọi stopRoom() finally bên trong ClientHandler.run()
+
+[4] Chuyển dữ liệu hiển thị Swing về luồng EDT
+Đưa thao tác update renderPlayers vào SwingUtilities.invokeLater
+source/client/ClientApp.java
+
+[5] Đồng bộ hóa hàm broadcastState phía Server
+Tránh đứt gãy gói tin khi có người chơi ngắt kết nối đột ngột đúng lúc Server đang duyệt danh sách người chơi.
+File cần sửa: source/server/GameRoom.java   
+Vị trí: Phương thức broadcastState()

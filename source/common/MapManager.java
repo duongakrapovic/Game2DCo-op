@@ -5,6 +5,7 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.*;
 import java.util.*;
+import java.util.List;
 
 public class MapManager {
     public static class Tile {
@@ -31,6 +32,21 @@ public class MapManager {
 
     public MapManager() {}
 
+    /**
+     * Khởi tạo mảng tiles với số lượng tile xác định.
+     * Bắt buộc phải gọi trước khi loadTilesetProperties hoặc loadTilesetImage.
+     */
+    public void initTileset(int totalTiles) {
+        if (totalTiles <= 0) {
+            throw new IllegalArgumentException("[FATAL ERROR] Tong so tile phai lon hon 0!");
+        }
+        tiles = new Tile[totalTiles];
+        for (int i = 0; i < totalTiles; i++) {
+            tiles[i] = new Tile();
+        }
+        System.out.println("[MapManager] Da khoi tao bo nho cho " + totalTiles + " tiles.");
+    }
+
     public void loadTilesetImage(String pngPath, int originalTileSize) {
         try {
             InputStream is = null;
@@ -38,29 +54,41 @@ public class MapManager {
             if (file.exists()) is = new FileInputStream(file);
             else is = getClass().getResourceAsStream("/" + pngPath);
 
-            if (is == null) return;
+            if (is == null) {
+                throw new FileNotFoundException("[FATAL ERROR] Khong tim thấy file anh Tileset PNG tai: " + pngPath);
+            }
 
             BufferedImage tileset = ImageIO.read(is);
             is.close();
 
             int cols = tileset.getWidth() / originalTileSize;
             int rows = tileset.getHeight() / originalTileSize;
-            tiles = new Tile[cols * rows];
+            int totalTiles = cols * rows;
+
+            // Neu mảng tiles chưa được khởi tạo, tự động khởi tạo theo kích thước ảnh
+            if (tiles == null || tiles.length < totalTiles) {
+                initTileset(totalTiles);
+            }
 
             int idx = 0;
             for (int y = 0; y < rows; y++) {
                 for (int x = 0; x < cols; x++) {
-                    tiles[idx] = new Tile();
                     tiles[idx].image = tileset.getSubimage(x * originalTileSize, y * originalTileSize, originalTileSize, originalTileSize);
                     idx++;
                 }
             }
+            System.out.println("[MapManager] Nap anh Tileset PNG thanh cong!");
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new RuntimeException("[FATAL ERROR] Loi khi nap file anh PNG: " + pngPath, e);
         }
     }
 
     public void loadTilesetProperties(String tsxPath) {
+        // Kiểm tra nguyên tắc Fail Fast: Nếu chưa cấp phát tiles -> CRASH NGAY
+        if (tiles == null) {
+            throw new IllegalStateException("[FATAL ERROR] Mang tiles chua duoc khoi tao! Hay goi initTileset() hoac loadTilesetImage() truoc!");
+        }
+
         try {
             InputStream is = null;
             File file = new File(tsxPath);
@@ -68,8 +96,7 @@ public class MapManager {
             else is = getClass().getResourceAsStream("/" + tsxPath);
 
             if (is == null) {
-                System.out.println("[MapManager] Khong tim thấy file TSX!");
-                return;
+                throw new FileNotFoundException("[FATAL ERROR] Khong tim thấy file thuoc tinh TSX tai: " + tsxPath);
             }
 
             BufferedReader br = new BufferedReader(new InputStreamReader(is));
@@ -81,8 +108,9 @@ public class MapManager {
             br.close();
 
             String xml = xmlBuilder.toString();
-            // Tách các thẻ <tile id="...">
             String[] tileBlocks = xml.split("<tile ");
+            int collisionCount = 0;
+
             for (int i = 1; i < tileBlocks.length; i++) {
                 String block = tileBlocks[i];
                 if (block.startsWith("id=\"")) {
@@ -90,18 +118,19 @@ public class MapManager {
                     int endId = block.indexOf("\"", startId);
                     int tileId = Integer.parseInt(block.substring(startId, endId));
 
-                    // Kiểm tra xem tile này có thuộc tính collision true hay không
                     if (block.contains("name=\"collision\"") && (block.contains("value=\"true\"") || block.contains("value=\"1\""))) {
-                        if (tiles != null && tileId >= 0 && tileId < tiles.length) {
+                        if (tileId >= 0 && tileId < tiles.length) {
                             tiles[tileId].collision = true;
-                            System.out.println("[MapManager] Set Collision TRUE cho Tile ID: " + tileId);
+                            collisionCount++;
+                        } else {
+                            throw new IndexOutOfBoundsException("[FATAL ERROR] Tile ID " + tileId + " trong TSX vuot qua kich thuoc mang tiles (" + tiles.length + ")");
                         }
                     }
                 }
             }
-            System.out.println("[MapManager] Parse thuoc tinh TSX hoan tat!");
+            System.out.println("[MapManager] Parse thuoc tinh TSX hoan tat! Tong so tile co va cham: " + collisionCount);
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new RuntimeException("[FATAL ERROR] Loi khi parse file TSX: " + tsxPath, e);
         }
     }
 
@@ -115,7 +144,9 @@ public class MapManager {
             if (f.exists()) is = new FileInputStream(f);
             else is = getClass().getResourceAsStream("/" + folderPath + "/" + fileName);
 
-            if (is == null) return null;
+            if (is == null) {
+                throw new FileNotFoundException("[FATAL ERROR] Khong tim thấy file Chunk TMX: " + fileName + " trong thư mục: " + folderPath);
+            }
 
             BufferedReader br = new BufferedReader(new InputStreamReader(is));
             StringBuilder xmlBuilder = new StringBuilder();
@@ -141,8 +172,7 @@ public class MapManager {
             }
             return c;
         } catch (Exception e) {
-            e.printStackTrace();
-            return null;
+            throw new RuntimeException("[FATAL ERROR] Loi khi nap file Chunk chunk" + chunkX + "_" + chunkY + ".tmx", e);
         }
     }
 
@@ -165,9 +195,9 @@ public class MapManager {
     public boolean isCollisionAtWorld(int worldX, int worldY) {
         if (worldX < 0 || worldY < 0) return true;
 
-        int tileCol = worldX / Common.TILE_SIZE;
-        int tileRow = worldY / Common.TILE_SIZE;
-
+        int tileCol = Math.floorDiv(worldX, Common.TILE_SIZE);
+        int tileRow = Math.floorDiv(worldY, Common.TILE_SIZE);  
+        
         int chunkX = tileCol / chunkSize;
         int chunkY = tileRow / chunkSize;
         int inChunkCol = tileCol % chunkSize;
@@ -184,21 +214,16 @@ public class MapManager {
         return false;
     }
 
-    // Tô viền ngoài màu đen
     public void draw(Graphics2D g2, int focusWorldX, int focusWorldY, int screenWidth, int screenHeight) {
-        // Tô nền đen cho màn hình
         g2.setColor(Color.BLACK);
         g2.fillRect(0, 0, screenWidth, screenHeight);
 
-        // Tính tổng kích thước World Map (3x3 Chunks)
         int totalMapWidth = Common.MAX_CHUNK_X * Common.CHUNK_SIZE * Common.TILE_SIZE;
         int totalMapHeight = Common.MAX_CHUNK_Y * Common.CHUNK_SIZE * Common.TILE_SIZE;
 
-        // Tính tọa độ Camera mong muốn
         int camX = focusWorldX - screenWidth / 2;
         int camY = focusWorldY - screenHeight / 2;
 
-        // Khóa biên Camera (Clamp) không cho trượt ra ngoài rìa map
         if (totalMapWidth > screenWidth) {
             camX = Math.max(0, Math.min(camX, totalMapWidth - screenWidth));
         }
@@ -206,7 +231,6 @@ public class MapManager {
             camY = Math.max(0, Math.min(camY, totalMapHeight - screenHeight));
         }
 
-        // Vẽ toàn bộ Tilemap
         for (Chunk c : loadedChunks.values()) {
             int chunkWorldX = c.chunkX * c.size * Common.TILE_SIZE;
             int chunkWorldY = c.chunkY * c.size * Common.TILE_SIZE;
@@ -223,7 +247,9 @@ public class MapManager {
 
                         if (screenX + Common.TILE_SIZE >= 0 && screenX <= screenWidth &&
                             screenY + Common.TILE_SIZE >= 0 && screenY <= screenHeight) {
-                            g2.drawImage(tiles[tileNum].image, screenX, screenY, Common.TILE_SIZE, Common.TILE_SIZE, null);
+                            if (tiles[tileNum].image != null) {
+                                g2.drawImage(tiles[tileNum].image, screenX, screenY, Common.TILE_SIZE, Common.TILE_SIZE, null);
+                            }
                         }
                     }
                 }

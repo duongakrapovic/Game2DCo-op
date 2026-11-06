@@ -18,17 +18,21 @@ public class GameRoom implements Runnable {
     public GameRoom(String roomName) {
         this.roomName = roomName;
         
-        // Khởi tạo MapManager mới (không tham số)
+        // Khởi tạo MapManager mới
         this.mapManager = new MapManager();
         
         // Đường dẫn chính xác tới thư mục chứa dữ liệu map
         String mapPath = "source/content/map";
         
-        // Nạp thuộc tính cản .tsx (Server chỉ nạp dữ liệu cản, không nạp ảnh .png)
+        // 1. Khởi tạo bắt buộc bộ nhớ cho mảng tiles (Truyền số lượng tile của Tileset, mặc định 256)
+        // Nếu không gọi hàm này -> loadTilesetProperties sẽ crash ngay lập tức!
+        this.mapManager.initTileset(256);
+        
+        // 2. Nạp thuộc tính cản .tsx (Nếu file hỏng/thiếu -> crash ngay)
         this.mapManager.loadTilesetProperties(mapPath + "/tileset.tsx");
         
-        // Nạp toàn bộ ma trận 9 Chunks (3x3: từ chunk0_0 tới chunk2_2)
-        this.mapManager.loadAllChunks(mapPath, 3, 3);
+        // 3. Nạp toàn bộ ma trận 9 Chunks (3x3: từ chunk0_0 tới chunk2_2)
+        this.mapManager.loadAllChunks(mapPath, Common.MAX_CHUNK_X, Common.MAX_CHUNK_Y);
 
         new Thread(this).start();
     }
@@ -41,6 +45,10 @@ public class GameRoom implements Runnable {
     public void removePlayer(String pId) {
         players.remove(pId);
         writers.remove(pId);
+    }
+
+    public void stopRoom() {
+        this.isRunning = false;
     }
 
     @Override
@@ -60,18 +68,22 @@ public class GameRoom implements Runnable {
     }
 
     private void broadcastState() {
-    StringBuilder sb = new StringBuilder(Common.CMD_STATE);
-    for (Player p : players.values()) {
-        sb.append(";").append(p.id).append(",")
-          .append(p.name).append(",")
-          .append((int) p.x).append(",")
-          .append((int) p.y).append(",")
-          .append(p.direction).append(",")
-          .append(p.spriteNum);
+        StringBuilder sb = new StringBuilder(Common.CMD_STATE);
+        // Tạo bản sao snapshot để tránh xung đột khi r/w concurrent
+        for (Player p : new java.util.ArrayList<>(players.values())) {
+            if (p == null) continue;
+            sb.append(";").append(p.id).append(",")
+            .append(p.name).append(",")
+            .append((int) p.x).append(",")
+            .append((int) p.y).append(",")
+            .append(p.direction).append(",")
+            .append(p.spriteNum);
+        }
+        String msg = sb.toString();
+        for (PrintWriter out : new java.util.ArrayList<>(writers.values())) {
+            if (out != null) {
+                out.println(msg);
+            }
+        }
     }
-    String msg = sb.toString();
-    for (PrintWriter out : writers.values()) {
-        out.println(msg);
-    }
-}
 }

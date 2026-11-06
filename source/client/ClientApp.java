@@ -429,11 +429,11 @@ public class ClientApp extends JFrame {
                             });
                         } else if (line.startsWith(Common.CMD_STATE)) {
                             String[] items = line.split(";");
-                            renderPlayers.clear();
+                            Map<String, RenderPlayer> tempMap = new HashMap<>();
                             for (int i = 1; i < items.length; i++) {
                                 String[] pData = items[i].split(",");
                                 if (pData.length >= 6) {
-                                    renderPlayers.put(pData[0], new RenderPlayer(
+                                    tempMap.put(pData[0], new RenderPlayer(
                                         pData[1], 
                                         Integer.parseInt(pData[2]), 
                                         Integer.parseInt(pData[3]), 
@@ -442,7 +442,12 @@ public class ClientApp extends JFrame {
                                     ));
                                 }
                             }
-                            gamePanel.repaint();
+                            // Cập nhật lên UI an toàn trên luồng Swing EDT
+                            SwingUtilities.invokeLater(() -> {
+                                renderPlayers.clear();
+                                renderPlayers.putAll(tempMap);
+                                gamePanel.repaint();
+                            });
                         } else if (line.startsWith(Common.CMD_ERROR)) {
                             String errorMsg = line.split(":")[1];
                             SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, errorMsg));

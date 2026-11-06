@@ -88,7 +88,9 @@ public class ServerApp {
                 if (currentRoom != null) {
                     currentRoom.removePlayer(pId);
                     if (currentRoom.players.isEmpty()) {
+                        currentRoom.stopRoom(); // <--- Bổ sung dòng này để dừng luồng phòng
                         rooms.remove(currentRoom.roomName);
+                        System.out.println("[Server] Da giai phong phong: " + currentRoom.roomName);
                     }
                 }
             }

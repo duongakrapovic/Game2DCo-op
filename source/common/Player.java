@@ -10,7 +10,10 @@ public class Player {
     public float vx = 0, vy = 0;
     
     // Nút bấm di chuyển Top-Down
-    public boolean left = false, right = false, up = false, down = false;
+    public volatile boolean left = false;
+    public volatile boolean right = false;
+    public volatile boolean up = false;
+    public volatile boolean down = false;
 
     // Trường lưu hướng nhìn và frame bước chân
     public String direction = "down"; // "up", "down", "left", "right"
