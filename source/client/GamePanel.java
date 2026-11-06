@@ -8,6 +8,8 @@ import source.common.Player;
 import javax.imageio.ImageIO;
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.io.File;
 import java.util.HashMap;
 import java.util.Map;
@@ -41,7 +43,6 @@ public class GamePanel extends JPanel {
 
     public boolean left = false, right = false, up = false, down = false;
 
-    // Các biến phụ trợ HUD
     private boolean showHud = true;
     private String hudLine1 = "";
     private String hudLine2 = "";
@@ -52,6 +53,14 @@ public class GamePanel extends JPanel {
         this.mapManager = mapManager;
         setFocusable(true);
         loadAssets();
+
+        // Tự động lấy lại Focus bàn phím khi nhấp chuột vào màn hình Game
+        addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                requestFocusInWindow();
+            }
+        });
     }
 
     private void loadAssets() {
@@ -124,7 +133,7 @@ public class GamePanel extends JPanel {
             String[] pData = items[i].split(",");
             if (pData.length >= 6) {
                 renderPlayers.put(pData[0], new RenderPlayer(
-                    pData[1], Integer.parseInt(pData[2]), Integer.parseInt(pData[3]), pData[4], Integer.parseInt(pData[5])
+                    pData[1], (int)Float.parseFloat(pData[2]), (int)Float.parseFloat(pData[3]), pData[4], Integer.parseInt(pData[5])
                 ));
             }
         }
@@ -203,7 +212,6 @@ public class GamePanel extends JPanel {
             g2.drawString(p.name, screenX - 5, screenY - 5);
         }
 
-        // Vẽ HUD Mạng F3 (Khung màu xanh đen)
         if (showHud && !hudLine1.isEmpty()) {
             g2.setColor(new Color(0, 40, 0, 200));
             g2.fillRect(10, 10, getWidth() - 20, 65);
@@ -214,7 +222,6 @@ public class GamePanel extends JPanel {
             g2.drawString(hudLine3, 20, 64);
         }
 
-        // Vẽ Banner Thông Báo Mất Kết Nối
         if (bannerMessage != null) {
             g2.setColor(new Color(0, 0, 0, 180));
             g2.fillRect(0, getHeight() / 2 - 40, getWidth(), 80);

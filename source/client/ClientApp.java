@@ -7,8 +7,6 @@ import source.common.Protocol;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
-import java.io.File;
-import java.io.IOException;
 
 public class ClientApp extends JFrame implements NetClient.Listener {
 
@@ -16,7 +14,6 @@ public class ClientApp extends JFrame implements NetClient.Listener {
     private final MapManager mapManager;
     private final GamePanel gamePanel;
 
-    // Các module con do ClientApp điều phối
     private NetClient netClient;
     private final ClientPrediction prediction;
     private final SnapshotInterpolator interpolator;
@@ -36,19 +33,16 @@ public class ClientApp extends JFrame implements NetClient.Listener {
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
 
-        // 1. Nạp Map
         String mapPath = "source/content/map";
         mapManager = new MapManager();
         mapManager.loadTilesetImage(mapPath + "/tileset.png", Common.ORIGINAL_TILE_SIZE);
         mapManager.loadTilesetProperties(mapPath + "/tileset.tsx");
         mapManager.loadAllChunks(mapPath, Common.MAX_CHUNK_X, Common.MAX_CHUNK_Y);
 
-        // 2. Khởi tạo các Module con
         gamePanel = new GamePanel(mapManager);
         prediction = new ClientPrediction(mapManager);
         interpolator = new SnapshotInterpolator();
 
-        // 3. Setup UI Scenes
         JPanel menuPanel = createMainMenuUI();
         JPanel lobbyPanel = createLobbyUI();
 
@@ -67,17 +61,6 @@ public class ClientApp extends JFrame implements NetClient.Listener {
                 if (netClient != null) netClient.close();
             }
         });
-    }
-
-    private void launchServerBatch() {
-        try {
-            File batFile = new File("run-server.bat");
-            if (batFile.exists()) {
-                ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", "start", "Dungeon Server", "run-server.bat");
-                pb.directory(batFile.getParentFile());
-                pb.start();
-            }
-        } catch (IOException ignored) {}
     }
 
     private JPanel createMainMenuUI() {
@@ -107,8 +90,7 @@ public class ClientApp extends JFrame implements NetClient.Listener {
             if (netClient != null) netClient.close();
             setTitle("Dungeon Co-op [OFFLINE]");
             gamePanel.startOfflineMode(myName);
-            cardLayout.show(mainContainer, "GAME");
-            gamePanel.requestFocusInWindow();
+            switchToGameScene();
         });
 
         btnOnline.addActionListener(e -> cardLayout.show(mainContainer, "LOBBY"));
@@ -152,7 +134,6 @@ public class ClientApp extends JFrame implements NetClient.Listener {
         JPanel centerSplit = new JPanel(new GridLayout(1, 2, 20, 0));
         centerSplit.setOpaque(false);
 
-        // CỘT TRÁI
         JPanel leftCol = new JPanel(new BorderLayout(5, 5));
         leftCol.setOpaque(false);
         leftCol.add(new JLabel("<html><font color='white'><b>DANH SÁCH PHÒNG ĐANG HOẠT ĐỘNG</b></font></html>"), BorderLayout.NORTH);
@@ -165,7 +146,6 @@ public class ClientApp extends JFrame implements NetClient.Listener {
         leftCol.add(btnJoin, BorderLayout.SOUTH);
         centerSplit.add(leftCol);
 
-        // CỘT PHẢI
         JPanel rightCol = new JPanel(new GridBagLayout());
         rightCol.setOpaque(false);
         GridBagConstraints gbc = new GridBagConstraints();
@@ -173,7 +153,7 @@ public class ClientApp extends JFrame implements NetClient.Listener {
         gbc.fill = GridBagConstraints.HORIZONTAL;
         gbc.gridx = 0;
 
-        gbc.gridy = 0; rightCol.add(new JLabel("<html><font color='white'><b>TẠO PHÒNG MỚI (TỰ KHỞI CHẠY SERVER)</b></font></html>"), gbc);
+        gbc.gridy = 0; rightCol.add(new JLabel("<html><font color='white'><b>TẠO PHÒNG MỚI</b></font></html>"), gbc);
         gbc.gridy = 1; rightCol.add(new JLabel("<html><font color='white'>Tên người chơi:</font></html>"), gbc);
         txtPlayerNameLobby = new JTextField(myName);
         gbc.gridy = 2; rightCol.add(txtPlayerNameLobby, gbc);
@@ -182,7 +162,7 @@ public class ClientApp extends JFrame implements NetClient.Listener {
         txtCreateRoomName = new JTextField("Room_1");
         gbc.gridy = 4; rightCol.add(txtCreateRoomName, gbc);
 
-        JButton btnCreate = new JButton("Tạo phòng & Chạy Server (Enter)");
+        JButton btnCreate = new JButton("Tạo phòng");
         btnCreate.setBackground(new Color(60, 140, 60));
         btnCreate.setForeground(Color.WHITE);
         gbc.gridy = 5; rightCol.add(btnCreate, gbc);
@@ -211,15 +191,13 @@ public class ClientApp extends JFrame implements NetClient.Listener {
         if (!pName.isEmpty()) myName = pName;
 
         if (netClient == null || netClient.getState() != NetClient.State.CONNECTED) {
-            launchServerBatch();
-            try { Thread.sleep(2500); } catch (InterruptedException ignored) {}
             connectToServer();
+            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
         }
 
         if (netClient != null) {
             netClient.send("CREATE_ROOM:" + rName + ":" + myName);
-            cardLayout.show(mainContainer, "GAME");
-            gamePanel.requestFocusInWindow();
+            switchToGameScene();
         }
     }
 
@@ -228,21 +206,29 @@ public class ClientApp extends JFrame implements NetClient.Listener {
         String pName = Protocol.sanitizeName(txtPlayerNameLobby.getText().trim());
         if (!pName.isEmpty()) myName = pName;
 
-        if (selected != null && netClient != null && netClient.getState() == NetClient.State.CONNECTED) {
+        if (netClient == null || netClient.getState() != NetClient.State.CONNECTED) {
+            connectToServer();
+            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+        }
+
+        if (selected != null && netClient != null) {
             String rName = selected.split(" ")[0];
             netClient.send("JOIN_ROOM:" + rName + ":" + myName);
-            cardLayout.show(mainContainer, "GAME");
-            gamePanel.requestFocusInWindow();
+            switchToGameScene();
         }
     }
 
-    /**
-     * THIẾT LẬP PHÍM BẤM WASD VÀ HỆ THỐNG PHÍM CHỨC NĂNG F3-F9 CỦA README.MD
-     */
+    private void switchToGameScene() {
+        cardLayout.show(mainContainer, "GAME");
+        SwingUtilities.invokeLater(() -> {
+            gamePanel.setFocusable(true);
+            gamePanel.requestFocusInWindow();
+        });
+    }
+
     private void setupKeyBindings() {
         int cond = JComponent.WHEN_IN_FOCUSED_WINDOW;
 
-        // Phím di chuyển WASD
         String[] dirs = {"up", "down", "left", "right"};
         int[][] keys = {{KeyEvent.VK_W, KeyEvent.VK_UP}, {KeyEvent.VK_S, KeyEvent.VK_DOWN}, {KeyEvent.VK_A, KeyEvent.VK_LEFT}, {KeyEvent.VK_D, KeyEvent.VK_RIGHT}};
 
@@ -263,7 +249,6 @@ public class ClientApp extends JFrame implements NetClient.Listener {
             });
         }
 
-        // Phím ESC: Thoát về Menu
         gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "esc");
         gamePanel.getActionMap().put("esc", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) {
@@ -275,13 +260,11 @@ public class ClientApp extends JFrame implements NetClient.Listener {
             }
         });
 
-        // Phím F3: Bật/Tắt HUD Mạng
         gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F3, 0), "f3");
         gamePanel.getActionMap().put("f3", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) { gamePanel.toggleHud(); }
         });
 
-        // Phím F4: Đổi Lag Giả Lập (0 -> 50 -> 100 -> 200 ms)
         gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F4, 0), "f4");
         gamePanel.getActionMap().put("f4", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) {
@@ -293,19 +276,16 @@ public class ClientApp extends JFrame implements NetClient.Listener {
             }
         });
 
-        // Phím F6: Bật/Tắt Prediction (Dự đoán)
         gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0), "f6");
         gamePanel.getActionMap().put("f6", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) { prediction.setEnabled(!prediction.isEnabled()); }
         });
 
-        // Phím F7: Bật/Tắt Interpolation (Nội suy)
         gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F7, 0), "f7");
         gamePanel.getActionMap().put("f7", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) { interpolator.setEnabled(!interpolator.isEnabled()); }
         });
 
-        // Phím F9: Giả lập Rớt Mạng
         gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F9, 0), "f9");
         gamePanel.getActionMap().put("f9", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) {
@@ -322,14 +302,12 @@ public class ClientApp extends JFrame implements NetClient.Listener {
             case "down": gamePanel.down = pressed; break;
         }
 
-        // Nếu Online: Thực hiện bước Prediction và gửi lệnh kèm theo Seq
         if (netClient != null && netClient.getState() == NetClient.State.CONNECTED) {
             ClientPrediction.Input input = prediction.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down);
             netClient.send("INPUT:" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.seq);
         }
     }
 
-    // --- NETCLIENT LISTENER CALLBACKS ---
     @Override
     public void onMessage(String line) {
         if (line.startsWith(Common.CMD_ROOM_LIST)) {
