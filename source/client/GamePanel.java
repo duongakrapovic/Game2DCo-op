@@ -34,13 +34,19 @@ public class GamePanel extends JPanel {
     private final Map<String, RenderPlayer> renderPlayers = new ConcurrentHashMap<>();
     private final MapManager mapManager;
 
-    private boolean isOfflineMode = false;
     private Player localPlayer;
     private String myName = "Player";
     private Thread localGameThread;
     private volatile boolean isLocalRunning = false;
 
     public boolean left = false, right = false, up = false, down = false;
+
+    // Các biến phụ trợ HUD
+    private boolean showHud = true;
+    private String hudLine1 = "";
+    private String hudLine2 = "";
+    private String hudLine3 = "";
+    private String bannerMessage = null;
 
     public GamePanel(MapManager mapManager) {
         this.mapManager = mapManager;
@@ -58,15 +64,13 @@ public class GamePanel extends JPanel {
                 frames[1] = ImageIO.read(new File(path + "boy_" + dir + "_2.png"));
                 spriteMap.put(dir, frames);
             }
-            System.out.println("[GamePanel] Nap thanh cong bo sprite nhan vat boy_!");
         } catch (Exception e) {
-            System.err.println("[GamePanel] Khong tim thay du sprite trong " + path + ": " + e.getMessage());
+            System.err.println("[GamePanel] Lỗi nạp sprite: " + e.getMessage());
         }
     }
 
     public void startOfflineMode(String playerName) {
         stopOfflineMode();
-        isOfflineMode = true;
         this.myName = playerName;
 
         localPlayer = new Player("LOCAL_1", myName);
@@ -127,6 +131,12 @@ public class GamePanel extends JPanel {
         repaint();
     }
 
+    public void setHudInfo(String l1, String l2, String l3) {
+        this.hudLine1 = l1; this.hudLine2 = l2; this.hudLine3 = l3;
+    }
+    public void toggleHud() { this.showHud = !this.showHud; }
+    public void setBannerMessage(String msg) { this.bannerMessage = msg; }
+
     @Override
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
@@ -157,7 +167,6 @@ public class GamePanel extends JPanel {
 
         int playerRenderSize = (int) (16 * Common.SCALE);
 
-        // Fallback vẽ tạm nhân vật nếu state online chưa về kịp để không bị tàng hình
         if (renderPlayers.isEmpty() || !foundMe) {
             Image[] defaultFrames = spriteMap.get("down");
             if (defaultFrames != null && defaultFrames[0] != null) {
@@ -192,6 +201,28 @@ public class GamePanel extends JPanel {
             g2.setColor(Color.WHITE);
             g2.setFont(new Font("Arial", Font.PLAIN, 12));
             g2.drawString(p.name, screenX - 5, screenY - 5);
+        }
+
+        // Vẽ HUD Mạng F3 (Khung màu xanh đen)
+        if (showHud && !hudLine1.isEmpty()) {
+            g2.setColor(new Color(0, 40, 0, 200));
+            g2.fillRect(10, 10, getWidth() - 20, 65);
+            g2.setColor(Color.GREEN);
+            g2.setFont(new Font("Monospaced", Font.BOLD, 13));
+            g2.drawString(hudLine1, 20, 28);
+            g2.drawString(hudLine2, 20, 46);
+            g2.drawString(hudLine3, 20, 64);
+        }
+
+        // Vẽ Banner Thông Báo Mất Kết Nối
+        if (bannerMessage != null) {
+            g2.setColor(new Color(0, 0, 0, 180));
+            g2.fillRect(0, getHeight() / 2 - 40, getWidth(), 80);
+            g2.setColor(Color.ORANGE);
+            g2.setFont(new Font("Arial", Font.BOLD, 22));
+            FontMetrics fm = g2.getFontMetrics();
+            int tx = (getWidth() - fm.stringWidth(bannerMessage)) / 2;
+            g2.drawString(bannerMessage, tx, getHeight() / 2 + 8);
         }
     }
 }

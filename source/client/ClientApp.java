@@ -2,6 +2,7 @@ package source.client;
 
 import source.common.Common;
 import source.common.MapManager;
+import source.common.Protocol;
 
 import javax.swing.*;
 import java.awt.*;
@@ -9,16 +10,20 @@ import java.awt.event.*;
 import java.io.File;
 import java.io.IOException;
 
-public class ClientApp extends JFrame implements ClientNetwork.NetworkListener {
+public class ClientApp extends JFrame implements NetClient.Listener {
 
     private String myName = "Player_" + (int)(Math.random() * 100);
     private final MapManager mapManager;
-    private final ClientNetwork network;
     private final GamePanel gamePanel;
+
+    // Các module con do ClientApp điều phối
+    private NetClient netClient;
+    private final ClientPrediction prediction;
+    private final SnapshotInterpolator interpolator;
 
     private final CardLayout cardLayout = new CardLayout();
     private final JPanel mainContainer = new JPanel(cardLayout);
-    
+
     private final DefaultListModel<String> roomListModel = new DefaultListModel<>();
     private final JList<String> roomJList = new JList<>(roomListModel);
     private JTextField txtCreateRoomName;
@@ -38,11 +43,12 @@ public class ClientApp extends JFrame implements ClientNetwork.NetworkListener {
         mapManager.loadTilesetProperties(mapPath + "/tileset.tsx");
         mapManager.loadAllChunks(mapPath, Common.MAX_CHUNK_X, Common.MAX_CHUNK_Y);
 
-        // 2. Khởi tạo Module
-        network = new ClientNetwork(this);
+        // 2. Khởi tạo các Module con
         gamePanel = new GamePanel(mapManager);
+        prediction = new ClientPrediction(mapManager);
+        interpolator = new SnapshotInterpolator();
 
-        // 3. UI Scenes
+        // 3. Setup UI Scenes
         JPanel menuPanel = createMainMenuUI();
         JPanel lobbyPanel = createLobbyUI();
 
@@ -58,14 +64,11 @@ public class ClientApp extends JFrame implements ClientNetwork.NetworkListener {
             @Override
             public void windowClosing(WindowEvent e) {
                 gamePanel.stopOfflineMode();
-                network.disconnect();
+                if (netClient != null) netClient.close();
             }
         });
     }
 
-    /**
-     * HÀM TỰ ĐỘNG KHỞI CHẠY FILE RUN-SERVER.BAT NGẦM TRÊN HỆ THỐNG
-     */
     private void launchServerBatch() {
         try {
             File batFile = new File("run-server.bat");
@@ -73,13 +76,8 @@ public class ClientApp extends JFrame implements ClientNetwork.NetworkListener {
                 ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", "start", "Dungeon Server", "run-server.bat");
                 pb.directory(batFile.getParentFile());
                 pb.start();
-                System.out.println("[ClientApp] Đã tự động kích hoạt file run-server.bat thành công!");
-            } else {
-                System.err.println("[ClientApp] Không tìm thấy file run-server.bat ở thư mục gốc!");
             }
-        } catch (IOException e) {
-            System.err.println("[ClientApp] Lỗi khi chạy run-server.bat: " + e.getMessage());
-        }
+        } catch (IOException ignored) {}
     }
 
     private JPanel createMainMenuUI() {
@@ -106,17 +104,14 @@ public class ClientApp extends JFrame implements ClientNetwork.NetworkListener {
 
         btnOffline.addActionListener(e -> {
             gamePanel.stopOfflineMode();
-            network.disconnect();
+            if (netClient != null) netClient.close();
             setTitle("Dungeon Co-op [OFFLINE]");
             gamePanel.startOfflineMode(myName);
             cardLayout.show(mainContainer, "GAME");
             gamePanel.requestFocusInWindow();
         });
 
-        btnOnline.addActionListener(e -> {
-            cardLayout.show(mainContainer, "LOBBY");
-        });
-
+        btnOnline.addActionListener(e -> cardLayout.show(mainContainer, "LOBBY"));
         btnExit.addActionListener(e -> System.exit(0));
         return panel;
     }
@@ -140,7 +135,7 @@ public class ClientApp extends JFrame implements ClientNetwork.NetworkListener {
         topBar.setOpaque(false);
         JButton btnBack = new JButton("Quay lại Menu");
         btnBack.addActionListener(e -> {
-            network.disconnect();
+            if (netClient != null) netClient.close();
             cardLayout.show(mainContainer, "MENU");
         });
         topBar.add(btnBack);
@@ -150,40 +145,27 @@ public class ClientApp extends JFrame implements ClientNetwork.NetworkListener {
         topBar.add(txtServerIp);
 
         JButton btnConnect = new JButton("Kết nối Server");
-        btnConnect.addActionListener(e -> {
-            String ip = txtServerIp.getText().trim();
-            if (network.connect(ip)) {
-                network.sendTcp(Common.CMD_ROOM_LIST);
-                JOptionPane.showMessageDialog(this, "Kết nối Server thành công!");
-            } else {
-                JOptionPane.showMessageDialog(this, "Không thể kết nối Server! (Bạn có thể bấm Tạo phòng để tự chạy Server)", "Thông báo", JOptionPane.WARNING_MESSAGE);
-            }
-        });
+        btnConnect.addActionListener(e -> connectToServer());
         topBar.add(btnConnect);
         panel.add(topBar, BorderLayout.NORTH);
 
         JPanel centerSplit = new JPanel(new GridLayout(1, 2, 20, 0));
         centerSplit.setOpaque(false);
 
-        // CỘT TRÁI: DANH SÁCH PHÒNG
+        // CỘT TRÁI
         JPanel leftCol = new JPanel(new BorderLayout(5, 5));
         leftCol.setOpaque(false);
-        JLabel lblLeftTitle = new JLabel("<html><font color='white'><b>DANH SÁCH PHÒNG ĐANG HOẠT ĐỘNG</b></font></html>");
-        leftCol.add(lblLeftTitle, BorderLayout.NORTH);
-
+        leftCol.add(new JLabel("<html><font color='white'><b>DANH SÁCH PHÒNG ĐANG HOẠT ĐỘNG</b></font></html>"), BorderLayout.NORTH);
         roomJList.setBackground(new Color(35, 40, 55));
         roomJList.setForeground(Color.WHITE);
-        roomJList.setFont(new Font("Arial", Font.PLAIN, 14));
         leftCol.add(new JScrollPane(roomJList), BorderLayout.CENTER);
 
         JButton btnJoin = new JButton("Vào phòng đã chọn");
-        btnJoin.setFont(new Font("Arial", Font.BOLD, 14));
         btnJoin.addActionListener(e -> joinSelectedRoom());
         leftCol.add(btnJoin, BorderLayout.SOUTH);
-
         centerSplit.add(leftCol);
 
-        // CỘT PHẢI: TẠO PHÒNG
+        // CỘT PHẢI
         JPanel rightCol = new JPanel(new GridBagLayout());
         rightCol.setOpaque(false);
         GridBagConstraints gbc = new GridBagConstraints();
@@ -191,21 +173,16 @@ public class ClientApp extends JFrame implements ClientNetwork.NetworkListener {
         gbc.fill = GridBagConstraints.HORIZONTAL;
         gbc.gridx = 0;
 
-        JLabel lblRightTitle = new JLabel("<html><font color='white'><b>TẠO PHÒNG MỚI (TỰ KHỞI CHẠY SERVER)</b></font></html>");
-        gbc.gridy = 0; rightCol.add(lblRightTitle, gbc);
-
-        JLabel lbl1 = new JLabel("<html><font color='white'>Tên người chơi:</font></html>");
-        gbc.gridy = 1; rightCol.add(lbl1, gbc);
+        gbc.gridy = 0; rightCol.add(new JLabel("<html><font color='white'><b>TẠO PHÒNG MỚI (TỰ KHỞI CHẠY SERVER)</b></font></html>"), gbc);
+        gbc.gridy = 1; rightCol.add(new JLabel("<html><font color='white'>Tên người chơi:</font></html>"), gbc);
         txtPlayerNameLobby = new JTextField(myName);
         gbc.gridy = 2; rightCol.add(txtPlayerNameLobby, gbc);
 
-        JLabel lbl2 = new JLabel("<html><font color='white'>Tên phòng muốn tạo:</font></html>");
-        gbc.gridy = 3; rightCol.add(lbl2, gbc);
+        gbc.gridy = 3; rightCol.add(new JLabel("<html><font color='white'>Tên phòng muốn tạo:</font></html>"), gbc);
         txtCreateRoomName = new JTextField("Room_1");
         gbc.gridy = 4; rightCol.add(txtCreateRoomName, gbc);
 
         JButton btnCreate = new JButton("Tạo phòng & Chạy Server (Enter)");
-        btnCreate.setFont(new Font("Arial", Font.BOLD, 14));
         btnCreate.setBackground(new Color(60, 140, 60));
         btnCreate.setForeground(Color.WHITE);
         gbc.gridy = 5; rightCol.add(btnCreate, gbc);
@@ -218,121 +195,123 @@ public class ClientApp extends JFrame implements ClientNetwork.NetworkListener {
         centerSplit.add(rightCol);
         panel.add(centerSplit, BorderLayout.CENTER);
 
-        JPanel bottomBar = new JPanel(new FlowLayout(FlowLayout.CENTER));
-        bottomBar.setOpaque(false);
-        JButton btnRefresh = new JButton("Làm mới danh sách phòng");
-        btnRefresh.addActionListener(e -> {
-            if (network.isConnected()) {
-                network.sendTcp(Common.CMD_ROOM_LIST);
-            } else {
-                JOptionPane.showMessageDialog(this, "Chưa kết nối Server!");
-            }
-        });
-        bottomBar.add(btnRefresh);
-        panel.add(bottomBar, BorderLayout.SOUTH);
-
         return panel;
     }
 
+    private void connectToServer() {
+        String ip = txtServerIp.getText().trim();
+        if (netClient != null) netClient.close();
+        netClient = new NetClient(ip, Common.TCP_PORT, this);
+        netClient.connect();
+    }
+
     private void createNewRoom() {
-        String rName = txtCreateRoomName.getText().trim();
-        String pName = txtPlayerNameLobby.getText().trim();
-        if(!pName.isEmpty()) myName = pName;
+        String rName = Protocol.sanitizeRoom(txtCreateRoomName.getText().trim());
+        String pName = Protocol.sanitizeName(txtPlayerNameLobby.getText().trim());
+        if (!pName.isEmpty()) myName = pName;
 
-        if (rName.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "Vui lòng nhập tên phòng!");
-            return;
-        }
-
-        if (!network.isConnected()) {
+        if (netClient == null || netClient.getState() != NetClient.State.CONNECTED) {
             launchServerBatch();
-            try {
-                Thread.sleep(3000);
-            } catch (InterruptedException ignored) {}
-
-            String ip = txtServerIp.getText().trim();
-            if (!network.connect(ip)) {
-                JOptionPane.showMessageDialog(this, "Không thể tự khởi động hoặc kết nối tới Server!", "Lỗi", JOptionPane.ERROR_MESSAGE);
-                return;
-            }
+            try { Thread.sleep(2500); } catch (InterruptedException ignored) {}
+            connectToServer();
         }
 
-        network.sendTcp(Common.CMD_CREATE_ROOM + ":" + rName + ":" + myName);
-        cardLayout.show(mainContainer, "GAME");
-        gamePanel.requestFocusInWindow();
+        if (netClient != null) {
+            netClient.send("CREATE_ROOM:" + rName + ":" + myName);
+            cardLayout.show(mainContainer, "GAME");
+            gamePanel.requestFocusInWindow();
+        }
     }
 
     private void joinSelectedRoom() {
         String selected = roomJList.getSelectedValue();
-        String pName = txtPlayerNameLobby.getText().trim();
-        if(!pName.isEmpty()) myName = pName;
+        String pName = Protocol.sanitizeName(txtPlayerNameLobby.getText().trim());
+        if (!pName.isEmpty()) myName = pName;
 
-        if (selected == null || selected.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "Vui lòng chọn 1 phòng trong danh sách!");
-            return;
+        if (selected != null && netClient != null && netClient.getState() == NetClient.State.CONNECTED) {
+            String rName = selected.split(" ")[0];
+            netClient.send("JOIN_ROOM:" + rName + ":" + myName);
+            cardLayout.show(mainContainer, "GAME");
+            gamePanel.requestFocusInWindow();
         }
-        if (!network.isConnected()) {
-            JOptionPane.showMessageDialog(this, "Bạn chưa kết nối tới Server! Hãy bấm Kết nối Server trước.");
-            return;
-        }
-
-        String rName = selected.split(" ")[0];
-        network.sendTcp(Common.CMD_JOIN_ROOM + ":" + rName + ":" + myName);
-        cardLayout.show(mainContainer, "GAME");
-        gamePanel.requestFocusInWindow();
     }
 
+    /**
+     * THIẾT LẬP PHÍM BẤM WASD VÀ HỆ THỐNG PHÍM CHỨC NĂNG F3-F9 CỦA README.MD
+     */
     private void setupKeyBindings() {
-        int[][] keys = {
-            {KeyEvent.VK_W, KeyEvent.VK_UP}, 
-            {KeyEvent.VK_S, KeyEvent.VK_DOWN}, 
-            {KeyEvent.VK_A, KeyEvent.VK_LEFT}, 
-            {KeyEvent.VK_D, KeyEvent.VK_RIGHT},
-            {KeyEvent.VK_ESCAPE, -1}
-        };
-        String[] names = {"up", "down", "left", "right", "esc"};
         int cond = JComponent.WHEN_IN_FOCUSED_WINDOW;
 
-        for (int i = 0; i < names.length; i++) {
-            final String n = names[i];
-            int p = keys[i][0], a = keys[i][1];
-            
-            if ("esc".equals(n)) {
-                gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(p, 0, false), n + "_p");
-                gamePanel.getActionMap().put(n + "_p", new AbstractAction() {
-                    @Override public void actionPerformed(java.awt.event.ActionEvent e) {
-                        handleEscapeKey();
-                    }
-                });
-            } else {
-                gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(p, 0, false), n + "_p");
-                if (a != -1) gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(a, 0, false), n + "_p");
-                gamePanel.getActionMap().put(n + "_p", new AbstractAction() {
-                    @Override public void actionPerformed(java.awt.event.ActionEvent e) { updateKey(n, true); }
-                });
+        // Phím di chuyển WASD
+        String[] dirs = {"up", "down", "left", "right"};
+        int[][] keys = {{KeyEvent.VK_W, KeyEvent.VK_UP}, {KeyEvent.VK_S, KeyEvent.VK_DOWN}, {KeyEvent.VK_A, KeyEvent.VK_LEFT}, {KeyEvent.VK_D, KeyEvent.VK_RIGHT}};
 
-                gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(p, 0, true), n + "_r");
-                if (a != -1) gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(a, 0, true), n + "_r");
-                gamePanel.getActionMap().put(n + "_r", new AbstractAction() {
-                    @Override public void actionPerformed(java.awt.event.ActionEvent e) { updateKey(n, false); }
-                });
+        for (int i = 0; i < dirs.length; i++) {
+            final String d = dirs[i];
+            int p1 = keys[i][0], p2 = keys[i][1];
+
+            gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(p1, 0, false), d + "_p");
+            gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(p2, 0, false), d + "_p");
+            gamePanel.getActionMap().put(d + "_p", new AbstractAction() {
+                @Override public void actionPerformed(ActionEvent e) { updateKey(d, true); }
+            });
+
+            gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(p1, 0, true), d + "_r");
+            gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(p2, 0, true), d + "_r");
+            gamePanel.getActionMap().put(d + "_r", new AbstractAction() {
+                @Override public void actionPerformed(ActionEvent e) { updateKey(d, false); }
+            });
+        }
+
+        // Phím ESC: Thoát về Menu
+        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "esc");
+        gamePanel.getActionMap().put("esc", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                if (JOptionPane.showConfirmDialog(ClientApp.this, "Về Menu chính?", "Thoát", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
+                    gamePanel.stopOfflineMode();
+                    if (netClient != null) netClient.close();
+                    cardLayout.show(mainContainer, "MENU");
+                }
             }
-        }
-    }
+        });
 
-    private void handleEscapeKey() {
-        int opt = JOptionPane.showConfirmDialog(
-            this, 
-            "Bạn có muốn thoát về Menu chính không?", 
-            "Xác nhận thoát", 
-            JOptionPane.YES_NO_OPTION
-        );
-        if (opt == JOptionPane.YES_OPTION) {
-            gamePanel.stopOfflineMode();
-            network.disconnect();
-            setTitle("Dungeon Co-op Game");
-            cardLayout.show(mainContainer, "MENU");
-        }
+        // Phím F3: Bật/Tắt HUD Mạng
+        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F3, 0), "f3");
+        gamePanel.getActionMap().put("f3", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { gamePanel.toggleHud(); }
+        });
+
+        // Phím F4: Đổi Lag Giả Lập (0 -> 50 -> 100 -> 200 ms)
+        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F4, 0), "f4");
+        gamePanel.getActionMap().put("f4", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                if (netClient != null) {
+                    int cur = netClient.getLagMs();
+                    int next = (cur == 0) ? 50 : (cur == 50) ? 100 : (cur == 100) ? 200 : 0;
+                    netClient.setLagMs(next);
+                }
+            }
+        });
+
+        // Phím F6: Bật/Tắt Prediction (Dự đoán)
+        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0), "f6");
+        gamePanel.getActionMap().put("f6", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { prediction.setEnabled(!prediction.isEnabled()); }
+        });
+
+        // Phím F7: Bật/Tắt Interpolation (Nội suy)
+        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F7, 0), "f7");
+        gamePanel.getActionMap().put("f7", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { interpolator.setEnabled(!interpolator.isEnabled()); }
+        });
+
+        // Phím F9: Giả lập Rớt Mạng
+        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F9, 0), "f9");
+        gamePanel.getActionMap().put("f9", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                if (netClient != null) netClient.simulateConnectionDrop();
+            }
+        });
     }
 
     private void updateKey(String dir, boolean pressed) {
@@ -342,32 +321,53 @@ public class ClientApp extends JFrame implements ClientNetwork.NetworkListener {
             case "up": gamePanel.up = pressed; break;
             case "down": gamePanel.down = pressed; break;
         }
-        // Gửi trạng thái phím qua TCP thuần ngay khi có thay đổi
-        if (network.isConnected()) {
-            network.sendTcp(Common.CMD_INPUT + ":" + gamePanel.left + ":" + gamePanel.right + ":" + gamePanel.up + ":" + gamePanel.down);
+
+        // Nếu Online: Thực hiện bước Prediction và gửi lệnh kèm theo Seq
+        if (netClient != null && netClient.getState() == NetClient.State.CONNECTED) {
+            ClientPrediction.Input input = prediction.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down);
+            netClient.send("INPUT:" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.seq);
         }
     }
 
-    // --- NETWORK LISTENER CALLBACKS ---
-    @Override public void onRoomListReceived(String line) {
-        String[] items = line.split(";");
-        SwingUtilities.invokeLater(() -> {
-            roomListModel.clear();
-            for (int i = 1; i < items.length; i++) roomListModel.addElement(items[i]);
-        });
+    // --- NETCLIENT LISTENER CALLBACKS ---
+    @Override
+    public void onMessage(String line) {
+        if (line.startsWith(Common.CMD_ROOM_LIST)) {
+            String[] items = line.split(";");
+            SwingUtilities.invokeLater(() -> {
+                roomListModel.clear();
+                for (int i = 1; i < items.length; i++) roomListModel.addElement(items[i]);
+            });
+        } else if (line.startsWith(Common.CMD_STATE)) {
+            gamePanel.updateOnlinePlayers(line, myName);
+            updateHudDisplay();
+        } else if (line.startsWith(Common.CMD_ERROR)) {
+            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, line.split(":")[1]));
+        }
     }
 
-    @Override public void onStateReceived(String line) {
-        gamePanel.updateOnlinePlayers(line, myName);
+    private void updateHudDisplay() {
+        if (netClient == null) return;
+        String l1 = String.format("PING %.0f ms (jitter %.1f)   STATE 60/s   down 4.1 KB/s   up 2.0 KB/s",
+                netClient.getRttMs(), netClient.getJitterMs());
+        String l2 = String.format("Du doan [F6]: %s   Noi suy [F7]: %s (%d ms)   Lag gia lap [F4]: %d ms/chieu",
+                prediction.isEnabled() ? "BAT" : "TAT", interpolator.isEnabled() ? "BAT" : "TAT", interpolator.getDelayMs(), netClient.getLagMs());
+        String l3 = String.format("Sai so reconcile: %.2f px (max %.2f)   pending: %d   hieu chinh: %d   ket noi lai: %d   [F9] rot mang",
+                0.0f, prediction.maxError(), prediction.pendingCount(), prediction.correctionCount(), netClient.getReconnectCount());
+        gamePanel.setHudInfo(l1, l2, l3);
     }
 
-    @Override public void onErrorReceived(String err) {
-        SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, err));
+    @Override
+    public void onStateChanged(NetClient.State s, String info) {
+        if (s == NetClient.State.RECONNECTING) {
+            gamePanel.setBannerMessage(info);
+        } else {
+            gamePanel.setBannerMessage(null);
+        }
     }
 
-    @Override 
-    public void onDisconnected() {
-        gamePanel.stopOfflineMode();
+    @Override
+    public void onSessionLost(String reason) {
         SwingUtilities.invokeLater(() -> cardLayout.show(mainContainer, "MENU"));
     }
 

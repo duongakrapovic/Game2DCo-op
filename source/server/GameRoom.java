@@ -8,19 +8,12 @@ import source.common.Player;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * ============================================================================
- * GAME ROOM (SOURCE/SERVER/GAMEROOM.JAVA)
- * ============================================================================
- * Chạy Game Loop 60 FPS độc lập cho 1 phòng chơi.
- * Tính toán vật lý và broadcast trạng thái (STATE) qua TCP đến các Client trong phòng.
- * ============================================================================
- */
 public class GameRoom implements Runnable {
 
     private final String roomId;
     private final Map<String, Player> players = new ConcurrentHashMap<>();
     private final Map<String, TcpLobbyServer.ClientHandler> clientHandlers = new ConcurrentHashMap<>();
+    private final Map<String, Integer> lastAcks = new ConcurrentHashMap<>();
 
     private final MapManager mapManager;
     private volatile boolean isRunning = true;
@@ -52,9 +45,20 @@ public class GameRoom implements Runnable {
         }
     }
 
+    public void updatePlayerHandler(String playerId, TcpLobbyServer.ClientHandler handler) {
+        if (handler != null && players.containsKey(playerId)) {
+            clientHandlers.put(playerId, handler);
+        }
+    }
+
     public void removePlayer(String playerId) {
         players.remove(playerId);
         clientHandlers.remove(playerId);
+        lastAcks.remove(playerId);
+    }
+
+    public void updateAck(String playerId, int seq) {
+        lastAcks.put(playerId, seq);
     }
 
     public void stop() {
@@ -69,15 +73,12 @@ public class GameRoom implements Runnable {
         long nextTick = System.nanoTime();
 
         while (isRunning) {
-            // 1. Cập nhật vật lý cho tất cả player trong phòng
             for (Player p : players.values()) {
                 PhysicsEngine.updatePlayer(p, mapManager);
             }
 
-            // 2. Broadcast trạng thái tọa độ qua TCP
             broadcastTcpState();
 
-            // 3. Đồng hồ nhịp 60Hz ổn định
             nextTick += Common.TICK_NS;
             long sleepNs = nextTick - System.nanoTime();
             if (sleepNs > 0) {
@@ -92,20 +93,19 @@ public class GameRoom implements Runnable {
         }
     }
 
-    /**
-     * Đóng gói tọa độ và gửi trạng thái STATE qua TCP cho từng Client trong phòng
-     */
     private void broadcastTcpState() {
         if (players.isEmpty()) return;
 
         StringBuilder sb = new StringBuilder(Common.CMD_STATE);
         for (Player p : players.values()) {
+            int ack = lastAcks.getOrDefault(p.id, -1);
             sb.append(";").append(p.id).append(",")
               .append(p.name).append(",")
-              .append((int)p.x).append(",")
-              .append((int)p.y).append(",")
+              .append(Common.Protocol.fmt2(p.x)).append(",")
+              .append(Common.Protocol.fmt2(p.y)).append(",")
               .append(p.direction).append(",")
-              .append(p.spriteNum);
+              .append(p.spriteNum).append(",")
+              .append(ack);
         }
 
         String stateMsg = sb.toString();

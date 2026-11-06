@@ -12,7 +12,8 @@ public class Common {
     // ========================================================================
     // 1. CẤU HÌNH HỆ THỐNG & PORT TCP THUẦN
     // ========================================================================
-    public static final int TCP_PORT = 8888; // Port kết nối TCP chung cho cả Lobby lẫn Gameplay
+    public static final int TCP_PORT = 8888;
+    public static final int PORT     = 8888; // Alias tương thích với NetSelfTest & BotBench
 
     public static final int ORIGINAL_TILE_SIZE = 16;
     public static final float SCALE = 2.0f; 
@@ -45,8 +46,8 @@ public class Common {
     public static final String CMD_WELCOME     = "WELCOME";    
     public static final String CMD_JOINED      = "JOINED";     
     public static final String CMD_ERROR       = "ERROR";
-    public static final String CMD_INPUT       = "INPUT";      // Lệnh truyền phím bấm qua TCP
-    public static final String CMD_STATE       = "STATE";      // Lệnh đồng bộ trạng thái tọa độ qua TCP
+    public static final String CMD_INPUT       = "INPUT";
+    public static final String CMD_STATE       = "STATE";
 
     // ========================================================================
     // 3. ỦY QUYỀN VÀ TRUY XUẤT MODULE CON QUA FACADE
@@ -58,4 +59,6 @@ public class Common {
     public static class PhysicsEngine extends source.common.PhysicsEngine {}
 
     public static class MapManager extends source.common.MapManager {}
+
+    public static class Protocol extends source.common.Protocol {}
 }

@@ -1,6 +1,9 @@
 package source.server;
 
 import source.common.Common;
+import source.common.Protocol;
+import source.common.Player;
+
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -8,13 +11,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * ============================================================================
- * TCP LOBBY & GAME SERVER (SOURCE/SERVER/TCPLOBBYSERVER.JAVA)
- * ============================================================================
- * Xử lý kết nối TCP toàn diện cho Sảnh chờ và nhận Input di chuyển trong game.
- * ============================================================================
- */
 public class TcpLobbyServer {
 
     private final int port;
@@ -75,10 +71,11 @@ public class TcpLobbyServer {
 
     public class ClientHandler implements Runnable {
         private final Socket socket;
-        private final String playerId;
+        private String playerId;
         private PrintWriter out;
         private volatile boolean inLobby = true;
         private GameRoom currentRoom = null;
+        private ServerApp.Session session = null;
 
         public ClientHandler(Socket socket, String playerId) {
             this.socket = socket;
@@ -103,11 +100,12 @@ public class TcpLobbyServer {
             try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))) {
                 out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
 
-                send(Common.CMD_WELCOME + ":" + playerId);
+                session = app.createSession(playerId, "Player");
+                send(Common.CMD_WELCOME + ":" + playerId + ":" + session.token);
                 send(app.getRoomListMessage());
 
                 String line;
-                while ((line = in.readLine()) != null) {
+                while ((line = Protocol.readLineLimited(in, Protocol.MAX_LINE_LENGTH_CLIENT)) != null) {
                     handleCommand(line.trim());
                 }
             } catch (IOException ignored) {
@@ -127,6 +125,31 @@ public class TcpLobbyServer {
 
         private void handleCommand(String line) {
             if (line.isEmpty()) return;
+
+            if (line.startsWith("PING:")) {
+                send("PONG:" + line.substring(5));
+                return;
+            }
+
+            if (line.startsWith("RESUME:")) {
+                String token = line.substring(7).trim();
+                ServerApp.Session oldSession = app.getSessionByToken(token);
+                if (oldSession != null && oldSession.roomId != null) {
+                    GameRoom room = app.getRoom(oldSession.roomId);
+                    if (room != null && room.getPlayers().containsKey(oldSession.playerId)) {
+                        this.playerId = oldSession.playerId;
+                        this.session = oldSession;
+                        this.currentRoom = room;
+                        this.inLobby = false;
+                        room.updatePlayerHandler(playerId, this);
+                        send("RESUMED:" + room.getRoomId());
+                        return;
+                    }
+                }
+                send("RESUME_FAIL");
+                return;
+            }
+
             String[] parts = line.split(":");
             String cmd = parts[0];
 
@@ -136,70 +159,97 @@ public class TcpLobbyServer {
                     break;
 
                 case Common.CMD_CREATE_ROOM:
-                    if (parts.length >= 3) {
-                        String rName = parts[1];
-                        String pName = parts[2];
-                        if (app.getRoom(rName) != null) {
-                            send(Common.CMD_ERROR + ":Phong da ton tai!");
-                        } else {
-                            GameRoom newRoom = new GameRoom(rName);
-                            app.addRoom(newRoom);
-                            Common.Player player = new Common.Player(playerId, pName);
-                            newRoom.addPlayer(player, this);
-                            currentRoom = newRoom;
-                            inLobby = false;
-                            send(Common.CMD_JOINED + ":" + rName);
-                            broadcastRoomList();
-                        }
+                    if (parts.length < 3) {
+                        send(Common.CMD_ERROR + ":Lệnh thiếu tham số!");
+                        return;
+                    }
+                    String rName = Protocol.sanitizeRoom(parts[1]);
+                    String pName = Protocol.sanitizeName(parts[2]);
+
+                    leaveCurrentRoomIfAny();
+
+                    if (app.getRoom(rName) != null) {
+                        send(Common.CMD_ERROR + ":Phòng đã tồn tại!");
+                    } else {
+                        GameRoom newRoom = new GameRoom(rName);
+                        app.addRoom(newRoom);
+                        Player player = new Player(playerId, pName);
+                        newRoom.addPlayer(player, this);
+                        currentRoom = newRoom;
+                        inLobby = false;
+                        session.roomId = rName;
+                        send(Common.CMD_JOINED + ":" + rName);
+                        broadcastRoomList();
                     }
                     break;
 
                 case Common.CMD_JOIN_ROOM:
-                    if (parts.length >= 3) {
-                        String rName = parts[1];
-                        String pName = parts[2];
-                        GameRoom targetRoom = app.getRoom(rName);
-                        if (targetRoom == null) {
-                            send(Common.CMD_ERROR + ":Phong khong ton tai!");
-                        } else if (targetRoom.isFull()) {
-                            send(Common.CMD_ERROR + ":Phong da day!");
-                        } else {
-                            Common.Player player = new Common.Player(playerId, pName);
-                            targetRoom.addPlayer(player, this);
-                            currentRoom = targetRoom;
-                            inLobby = false;
-                            send(Common.CMD_JOINED + ":" + rName);
-                            broadcastRoomList();
-                        }
+                    if (parts.length < 3) {
+                        send(Common.CMD_ERROR + ":Lệnh thiếu tham số!");
+                        return;
+                    }
+                    String targetRName = Protocol.sanitizeRoom(parts[1]);
+                    String targetPName = Protocol.sanitizeName(parts[2]);
+
+                    GameRoom targetRoom = app.getRoom(targetRName);
+                    if (targetRoom == null) {
+                        send(Common.CMD_ERROR + ":Phòng không tồn tại!");
+                    } else if (targetRoom.isFull()) {
+                        send(Common.CMD_ERROR + ":Phòng đã đầy!");
+                    } else {
+                        leaveCurrentRoomIfAny();
+                        Player player = new Player(playerId, targetPName);
+                        targetRoom.addPlayer(player, this);
+                        currentRoom = targetRoom;
+                        inLobby = false;
+                        session.roomId = targetRName;
+                        send(Common.CMD_JOINED + ":" + targetRName);
+                        broadcastRoomList();
                     }
                     break;
 
                 case Common.CMD_INPUT:
-                    // Nhận lệnh phím bấm di chuyển qua TCP: INPUT:left:right:up:down
                     if (currentRoom != null && parts.length >= 5) {
-                        source.common.Player p = currentRoom.getPlayers().get(playerId);
+                        Player p = currentRoom.getPlayers().get(playerId);
                         if (p != null) {
                             p.left  = Boolean.parseBoolean(parts[1]);
                             p.right = Boolean.parseBoolean(parts[2]);
                             p.up    = Boolean.parseBoolean(parts[3]);
                             p.down  = Boolean.parseBoolean(parts[4]);
+
+                            if (parts.length >= 6) {
+                                try {
+                                    int seq = Integer.parseInt(parts[5]);
+                                    currentRoom.updateAck(playerId, seq);
+                                } catch (NumberFormatException ignored) {}
+                            }
                         }
                     }
                     break;
 
                 case Common.CMD_LEAVE_ROOM:
-                    if (currentRoom != null) {
-                        currentRoom.removePlayer(playerId);
-                        if (currentRoom.isEmpty()) {
-                            currentRoom.stop();
-                            app.removeRoom(currentRoom.getRoomId());
-                        }
-                        currentRoom = null;
-                        inLobby = true;
-                        send(app.getRoomListMessage());
-                        broadcastRoomList();
-                    }
+                    leaveCurrentRoomIfAny();
+                    send("LEFT");
+                    send(app.getRoomListMessage());
+                    broadcastRoomList();
                     break;
+
+                default:
+                    send(Common.CMD_ERROR + ":Lệnh không hợp lệ!");
+                    break;
+            }
+        }
+
+        private void leaveCurrentRoomIfAny() {
+            if (currentRoom != null) {
+                currentRoom.removePlayer(playerId);
+                if (currentRoom.isEmpty()) {
+                    currentRoom.stop();
+                    app.removeRoom(currentRoom.getRoomId());
+                }
+                if (session != null) session.roomId = null;
+                currentRoom = null;
+                inLobby = true;
             }
         }
     }

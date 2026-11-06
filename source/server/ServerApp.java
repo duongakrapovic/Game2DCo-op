@@ -4,18 +4,28 @@ import source.common.Common;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * ============================================================================
- * SERVER APP (SOURCE/SERVER/SERVERAPP.JAVA)
- * ============================================================================
- * Entry Point khởi tạo Headless Game Server chạy hoàn toàn bằng TCP Thuần.
- * ============================================================================
- */
 public class ServerApp {
 
+    public static class Session {
+        public final String playerId;
+        public final String token;
+        public final String playerName;
+        public String roomId;
+        public long lastActiveTime;
+
+        public Session(String playerId, String token, String playerName) {
+            this.playerId = playerId;
+            this.token = token;
+            this.playerName = playerName;
+            this.lastActiveTime = System.currentTimeMillis();
+        }
+    }
+
     private final Map<String, GameRoom> rooms = new ConcurrentHashMap<>();
+    private final Map<String, Session> sessionsByToken = new ConcurrentHashMap<>();
     private TcpLobbyServer tcpLobby;
 
     public static void main(String[] args) {
@@ -55,6 +65,7 @@ public class ServerApp {
             room.stop();
         }
         rooms.clear();
+        sessionsByToken.clear();
         System.out.println("[ServerApp] Da tat Server hoan toan.");
         System.exit(0);
     }
@@ -63,6 +74,17 @@ public class ServerApp {
     public GameRoom getRoom(String roomId) { return rooms.get(roomId); }
     public void addRoom(GameRoom room) { rooms.put(room.getRoomId(), room); }
     public void removeRoom(String roomId) { rooms.remove(roomId); }
+
+    public Session createSession(String playerId, String playerName) {
+        String token = UUID.randomUUID().toString().replace("-", "");
+        Session session = new Session(playerId, token, playerName);
+        sessionsByToken.put(token, session);
+        return session;
+    }
+
+    public Session getSessionByToken(String token) {
+        return sessionsByToken.get(token);
+    }
 
     public String getRoomListMessage() {
         StringBuilder sb = new StringBuilder(Common.CMD_ROOM_LIST);
