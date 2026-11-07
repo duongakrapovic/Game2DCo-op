@@ -248,6 +248,17 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             });
         }
 
+        gamePanel.getInputMap(cond).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_J, 0, false), "attack_press");
+        gamePanel.getActionMap().put("attack_press", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { sendAttackInput(true); }
+        });
+        gamePanel.getInputMap(cond).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_J, 0, true), "attack_release");
+        gamePanel.getActionMap().put("attack_release", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { sendAttackInput(false); }
+        });
+
         gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "esc");
         gamePanel.getActionMap().put("esc", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) {

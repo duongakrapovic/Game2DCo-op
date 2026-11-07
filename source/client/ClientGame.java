@@ -34,6 +34,7 @@ public class ClientGame extends JPanel {
     private Thread localGameThread;
     private volatile boolean isLocalRunning = false;
     private final Random rand = new Random();
+    private boolean previousLocalAttack;
 
     public boolean left = false, right = false, up = false, down = false, attack = false;
     private ClientApp clientAppRef = null;
@@ -108,11 +109,24 @@ public class ClientGame extends JPanel {
     }
 
     private Point getRandomMapPoint() {
-        int maxW = Common.MAX_CHUNK_X * Common.CHUNK_SIZE * Common.TILE_SIZE - 100;
-        int maxH = Common.MAX_CHUNK_Y * Common.CHUNK_SIZE * Common.TILE_SIZE - 100;
-        int rx = 100 + rand.nextInt(Math.max(1, maxW - 100));
-        int ry = 100 + rand.nextInt(Math.max(1, maxH - 100));
-        return new Point(rx, ry);
+        int maxW = Common.MAX_CHUNK_X * Common.CHUNK_SIZE * Common.TILE_SIZE - GamePhysics.ENTITY_SIZE;
+        int maxH = Common.MAX_CHUNK_Y * Common.CHUNK_SIZE * Common.TILE_SIZE - GamePhysics.ENTITY_SIZE;
+        for (int attempt = 0; attempt < 2000; attempt++) {
+            int x = rand.nextInt(Math.max(1, maxW));
+            int y = rand.nextInt(Math.max(1, maxH));
+            int right = x + GamePhysics.ENTITY_SIZE - 3;
+            int bottom = y + GamePhysics.ENTITY_SIZE - 3;
+            boolean walkable = !mapManager.isCollisionAtWorld(x + 3, y + 3)
+                    && !mapManager.isCollisionAtWorld(right, y + 3)
+                    && !mapManager.isCollisionAtWorld(x + 3, bottom)
+                    && !mapManager.isCollisionAtWorld(right, bottom);
+            if (walkable && Math.hypot(x - Common.SPAWN_X, y - Common.SPAWN_Y)
+                    >= GamePhysics.ENTITY_SIZE * 3) {
+                return new Point(x, y);
+            }
+        }
+        return new Point((int) Common.SPAWN_X + GamePhysics.ENTITY_SIZE * 4,
+                (int) Common.SPAWN_Y);
     }
 
     public void startOfflineMode(String playerName) {
@@ -120,6 +134,7 @@ public class ClientGame extends JPanel {
         this.myName = playerName;
 
         localPlayer = new GameData.PlayerState("LOCAL_1", myName);
+        previousLocalAttack = false;
         renderPlayers.clear();
         renderMonsters.clear();
 
@@ -152,30 +167,27 @@ public class ClientGame extends JPanel {
                 localPlayer.down = down;
 
                 // XỬ LÝ HOẠT ẢNH CHÉM: Tách riêng nhịp chém (tổng 36 ticks)
-                if (attack || localPlayer.isAttacking) {
-                    if (!localPlayer.isAttacking) {
-                        localPlayer.isAttacking = true;
-                        localPlayer.attackTicks = 0;
-
-                        Rectangle atkBox = GamePhysics.getAttackHitbox(localPlayer.x, localPlayer.y, localPlayer.direction);
-                        for (GameData.MonsterState m : renderMonsters.values()) {
-                            if (!m.isDead && atkBox.intersects(GamePhysics.getEntityBounds(m.x, m.y))) {
-                                m.hp -= 15;
-                                if (m.hp <= 0) {
-                                    m.isDead = true;
-                                    m.respawnTimer = 180;
-                                }
+                long wallNow = System.currentTimeMillis();
+                if (attack && !previousLocalAttack && !localPlayer.isAttacking) {
+                    localPlayer.isAttacking = true;
+                    localPlayer.attackTicks = 0;
+                    Rectangle attackBox = GamePhysics.getAttackHitbox(
+                            localPlayer.x, localPlayer.y, localPlayer.direction);
+                    for (GameData.MonsterState m : renderMonsters.values()) {
+                        if (!m.isDead && attackBox.intersects(GamePhysics.getEntityBounds(m.x, m.y))) {
+                            m.hp = Math.max(0, m.hp - 15);
+                            m.flashUntil = wallNow + 150;
+                            GamePhysics.applyKnockback(m, localPlayer.x, localPlayer.y, 16.0f, mapManager);
+                            if (m.hp == 0) {
+                                m.isDead = true;
+                                m.respawnTimer = 180;
+                                m.currentPath = new int[0][2];
+                                m.pathIndex = 0;
                             }
                         }
                     }
-
-                    localPlayer.attackTicks++;
-
-                    if (localPlayer.attackTicks >= 36) {
-                        localPlayer.isAttacking = false;
-                        localPlayer.attackTicks = 0;
-                    }
                 }
+                previousLocalAttack = attack;
 
                 GamePhysics.updatePlayer(localPlayer, mapManager, dt);
 
@@ -185,12 +197,16 @@ public class ClientGame extends JPanel {
                         if (m.respawnTimer <= 0) {
                             m.isDead = false;
                             m.hp = m.maxHp;
+                            m.flashUntil = 0;
+                            m.nextPathAt = 0;
+                            m.currentPath = new int[0][2];
+                            m.pathIndex = 0;
                             Point pt = getRandomMapPoint();
                             m.x = pt.x;
                             m.y = pt.y;
                         }
                     } else {
-                        GamePhysics.updateMonster(m, localPlayer, mapManager);
+                        GamePhysics.updateMonster(m, localPlayer, mapManager, dt);
                     }
                 }
 
@@ -220,7 +236,15 @@ public class ClientGame extends JPanel {
     public void updateOnlineWorld(String stateLine, String myCurrentName) {
         this.myName = myCurrentName;
         GameData.WorldSnapshot snapshot = GameProtocol.parseSnapshot(stateLine);
+        long now = System.currentTimeMillis();
 
+        for (GameData.PlayerState p : snapshot.players) {
+            GameData.PlayerState previous = renderPlayers.get(p.id);
+            if (previous != null) {
+                if (p.hp < previous.hp) p.flashUntil = now + 150;
+                p.attackTicks = previous.isAttacking ? previous.attackTicks + 1 : 0;
+            }
+        }
         renderPlayers.clear();
         for (GameData.PlayerState p : snapshot.players) {
             renderPlayers.put(p.id, p);
@@ -229,6 +253,10 @@ public class ClientGame extends JPanel {
             }
         }
 
+        for (GameData.MonsterState m : snapshot.monsters) {
+            GameData.MonsterState previous = renderMonsters.get(m.id);
+            if (previous != null && m.hp < previous.hp) m.flashUntil = now + 150;
+        }
         renderMonsters.clear();
         for (GameData.MonsterState m : snapshot.monsters) {
             renderMonsters.put(m.id, m);
@@ -250,12 +278,16 @@ public class ClientGame extends JPanel {
 
         int myX = (int) Common.SPAWN_X;
         int myY = (int) Common.SPAWN_Y;
+        int myHp = 100;
+        int myMaxHp = 100;
 
         boolean foundMe = false;
         for (GameData.PlayerState p : renderPlayers.values()) {
             if (p.name.equals(myName)) {
                 myX = (int) p.x;
                 myY = (int) p.y;
+                myHp = p.hp;
+                myMaxHp = p.maxHp;
                 foundMe = true;
                 break;
             }
@@ -284,13 +316,21 @@ public class ClientGame extends JPanel {
                 g2.drawImage(currentSlime, screenX, screenY, entitySize, entitySize, null);
             } else {
                 g2.setColor(Color.GREEN);
-                g2.fillOval(screenX, screenY, entitySize, entitySize);
+                g2.fillRoundRect(screenX, screenY, entitySize, entitySize, 12, 12);
             }
 
-            g2.setColor(Color.RED);
-            g2.fillRect(screenX, screenY - 6, entitySize, 4);
-            g2.setColor(Color.GREEN);
-            g2.fillRect(screenX, screenY - 6, (int)(entitySize * ((float)m.hp / m.maxHp)), 4);
+            if (System.currentTimeMillis() < m.flashUntil) {
+                g2.setColor(new Color(255, 25, 25, 140));
+                g2.fillRect(screenX, screenY, entitySize, entitySize);
+            }
+
+            if (m.hp < m.maxHp) {
+                g2.setColor(new Color(45, 45, 50));
+                g2.fillRect(screenX, screenY - 6, entitySize, 4);
+                float hpRatio = m.maxHp <= 0 ? 0 : Math.max(0, Math.min(1, (float) m.hp / m.maxHp));
+                g2.setColor(hpRatio > 0.3f ? new Color(65, 190, 85) : new Color(225, 55, 55));
+                g2.fillRect(screenX, screenY - 6, (int) (entitySize * hpRatio), 4);
+            }
         }
 
         // 2. Vẽ Players & Animation đòn chém
@@ -348,6 +388,11 @@ public class ClientGame extends JPanel {
                 g2.fillRect(screenX, screenY, entitySize, entitySize);
             }
 
+            if (System.currentTimeMillis() < p.flashUntil) {
+                g2.setColor(new Color(255, 25, 25, 140));
+                g2.fillRect(screenX, screenY, entitySize, entitySize);
+            }
+
             g2.setColor(Color.WHITE);
             g2.setFont(new Font("Arial", Font.BOLD, 12));
             g2.drawString(p.name, screenX - 5, screenY - 10);
@@ -358,14 +403,31 @@ public class ClientGame extends JPanel {
             g2.fillRect(screenX, screenY - 5, (int)(entitySize * ((float)p.hp / p.maxHp)), 4);
         }
 
+        int safeMaxHp = Math.max(1, myMaxHp);
+        g2.setColor(new Color(15, 18, 26, 210));
+        g2.fillRoundRect(16, 16, 240, 60, 12, 12);
+        g2.setColor(new Color(80, 95, 125));
+        g2.setStroke(new BasicStroke(1.5f));
+        g2.drawRoundRect(16, 16, 240, 60, 12, 12);
+        g2.setColor(Color.WHITE);
+        g2.setFont(new Font("Arial", Font.BOLD, 13));
+        g2.drawString("HP: " + Math.max(0, myHp) + " / " + safeMaxHp, 28, 36);
+        g2.setColor(new Color(45, 52, 70));
+        g2.fillRoundRect(28, 44, 216, 14, 8, 8);
+        int currentBarW = Math.max(0, Math.min(216, (int) (216 * ((float) myHp / safeMaxHp))));
+        g2.setColor(myHp > safeMaxHp * 0.3f ? new Color(225, 55, 55) : new Color(255, 120, 0));
+        g2.fillRoundRect(28, 44, currentBarW, 14, 8, 8);
+
         if (showHud && !hudLine1.isEmpty()) {
+            int hudX = 270;
+            int hudWidth = Math.max(0, getWidth() - hudX - 10);
             g2.setColor(new Color(0, 40, 0, 200));
-            g2.fillRect(10, 10, getWidth() - 20, 65);
+            g2.fillRoundRect(hudX, 10, hudWidth, 65, 10, 10);
             g2.setColor(Color.GREEN);
             g2.setFont(new Font("Monospaced", Font.BOLD, 13));
-            g2.drawString(hudLine1, 20, 28);
-            g2.drawString(hudLine2, 20, 46);
-            g2.drawString(hudLine3, 20, 64);
+            g2.drawString(hudLine1, hudX + 10, 28);
+            g2.drawString(hudLine2, hudX + 10, 46);
+            g2.drawString(hudLine3, hudX + 10, 64);
         }
 
         if (bannerMessage != null) {

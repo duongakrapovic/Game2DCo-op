@@ -152,15 +152,20 @@ public class ServerGame implements Runnable {
         if (pressed && !previouslyPressed && !player.isAttacking) {
             player.isAttacking = true;
             player.attackTicks = 0;
+            long now = System.currentTimeMillis();
             Rectangle attackHitbox = GamePhysics.getAttackHitbox(
                     player.x, player.y, player.direction);
             for (GameData.MonsterState monster : monsters.values()) {
                 if (!monster.isDead && attackHitbox.intersects(
                         GamePhysics.getEntityBounds(monster.x, monster.y))) {
                     monster.hp = Math.max(0, monster.hp - 15);
+                    monster.flashUntil = now + 150;
+                    GamePhysics.applyKnockback(monster, player.x, player.y, 16.0f, mapManager);
                     if (monster.hp == 0) {
                         monster.isDead = true;
                         monster.respawnTimer = randomRespawnTicks();
+                        monster.currentPath = new int[0][2];
+                        monster.pathIndex = 0;
                     }
                 }
             }
@@ -177,6 +182,10 @@ public class ServerGame implements Runnable {
                     monster.y = spawn.y;
                     monster.hp = monster.maxHp;
                     monster.isDead = false;
+                    monster.flashUntil = 0;
+                    monster.nextPathAt = 0;
+                    monster.currentPath = new int[0][2];
+                    monster.pathIndex = 0;
                 }
                 continue;
             }

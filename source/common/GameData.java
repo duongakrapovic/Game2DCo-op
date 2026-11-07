@@ -20,6 +20,8 @@ public class GameData {
         public boolean isAttacking = false;
         public int attackTicks = 0;
         public int lastAckSeq = -1;
+        public long flashUntil = 0;
+        public long invincibleUntil = 0;
 
         public volatile boolean left = false;
         public volatile boolean right = false;
@@ -39,6 +41,14 @@ public class GameData {
             this.hp = maxHp;
             this.vx = 0;
             this.vy = 0;
+            this.isAttacking = false;
+            this.attackTicks = 0;
+            this.left = false;
+            this.right = false;
+            this.up = false;
+            this.down = false;
+            this.flashUntil = 0;
+            this.invincibleUntil = System.currentTimeMillis() + 1000;
         }
     }
 
@@ -57,6 +67,10 @@ public class GameData {
         public int hp = 30;
         public int maxHp = 30;
         public boolean isDead = false;
+        public long flashUntil = 0;
+        public long nextPathAt = 0;
+        public int[][] currentPath = new int[0][2];
+        public int pathIndex = 0;
 
         public MonsterState(String id, float x, float y) {
             this.id = id;
@@ -64,6 +78,17 @@ public class GameData {
             this.y = y;
         }
     }
+
+    /*
+     * To add another monster kind (for example SOLDIER, SKELETON, or BOSS),
+     * keep its per-instance state here and initialize it in the constructor or
+     * in a factory: type, hp/maxHp, movement speed, attack range, damage, and
+     * attack cooldown. Put kind-specific behavior behind a small definition or
+     * switch in GamePhysics.updateMonster; do not add network fields unless the
+     * snapshot format is intentionally versioned. Keep generic runtime state
+     * such as position, current A* path, path index, and hit flash on this
+     * object so the server and offline simulation can use the same code.
+     */
 
     public static class PlayerInput {
         public int seq;
