@@ -5,9 +5,10 @@
 ## 🎯 MỤC TIÊU
 
 Client chịu trách nhiệm:
-- Hiển thị giao diện đồ họa game (tile map + nhân vật) bằng Java Swing
-- Nhận đầu vào bàn phím (WASD / mũi tên) và gửi lên server
-- Kết nối TCP tới server, nhận trạng thái game (`STATE`) và render
+- Hiển thị giao diện (menu, sảnh phòng, bản đồ tile, nhân vật) bằng Java Swing
+- Nhận phím (WASD / mũi tên) và gửi `INPUT` lên server **theo tick cố định 60 Hz**
+- **Dự đoán** chuyển động của nhân vật mình và **hòa giải** với server; **nội suy** người chơi khác
+- Duy trì kết nối: heartbeat, đo ping, **tự kết nối lại** khi rớt mạng
 - Hỗ trợ **chế độ Offline** (chơi đơn, không cần server)
 
 ---
@@ -18,9 +19,9 @@ Client chịu trách nhiệm:
 |------------|-----------|
 | Ngôn ngữ | Java 17+ |
 | Giao diện | Java Swing (`JFrame`, `JPanel`, `CardLayout`) |
-| Mạng | `java.net.Socket` (TCP client) |
-| Đa luồng | Thread lắng nghe server, Timer 60FPS render |
-| Bản đồ | `MapManager` (load + vẽ tilemap TMX) |
+| Mạng | `java.net.Socket` (TCP, `TCP_NODELAY`, UTF-8) |
+| Đa luồng | Luồng đọc mạng, luồng heartbeat, luồng tick online 60 Hz, luồng game loop offline |
+| Bản đồ | `common/MapManager` |
 
 ---
 
@@ -34,38 +35,34 @@ run-client.bat
 
 ### Cách 2: Thủ công
 ```bash
-# Đứng ở thư mục gốc project
-javac -encoding UTF-8 source/common/*.java source/server/PhysicsEngine.java source/client/*.java
+javac -encoding UTF-8 source/common/*.java source/client/*.java
 java -cp . source.client.ClientApp
+java -cp . source.client.ClientApp --offline     # vào thẳng chế độ offline
+java -cp . source.client.ClientApp --lag=150     # giả lập độ trễ 150 ms mỗi chiều
 ```
-
-### Chế độ khởi chạy
-Khi chạy, một hộp thoại sẽ hiện ra:
-
-| Tùy chọn | Mô tả |
-|----------|-------|
-| **Test Offline** | Chơi đơn ngay lập tức, không cần server, physics chạy tại client |
-| **Online** | Nhập IP server → Nhập tên → Vào sảnh chờ, tạo/vào phòng |
 
 ---
 
 ## 📦 CẤU TRÚC MODULE
 
-```
-source/client/
-├── README.md
-└── ClientApp.java    ← Toàn bộ logic client: UI, network, render, input
-```
+| Class | Trách nhiệm |
+|-------|------------|
+| `ClientApp` | UI (Menu / Lobby / Game), vẽ, HUD, phím. Nối các thành phần mạng lại với nhau |
+| `NetClient` | Tầng mạng không phụ thuộc Swing: kết nối, luồng đọc, `PING/PONG` (RTT, jitter), tự kết nối lại bằng `RESUME`, giả lập lag, thống kê |
+| `ClientPrediction` | Dự đoán chuyển động bằng đúng `PhysicsEngine` của server; lưu input chưa được `ack`; hòa giải khi nhận `STATE` |
+| `SnapshotInterpolator` | Lưu snapshot của người chơi khác và nội suy ở thời điểm "hiện tại − 100 ms" |
 
-### Các thành phần trong `ClientApp.java`
-
-| Thành phần | Mô tả |
-|------------|-------|
-| `main()` | Hộp thoại chọn chế độ, kết nối TCP nếu Online |
-| `createLobbyUI()` | Sảnh chờ: danh sách phòng, nút Tạo/Vào/Làm mới |
-| `GamePanel` | Vẽ tile map và nhân vật lên màn hình |
-| `updateKey()` | Xử lý phím bấm, gửi `INPUT` lên server |
-| Listener thread | Đọc gói tin `STATE` / `ROOM_LIST` / `ERROR` từ server |
+### Luồng hoạt động (Online)
+```
+1. NetClient.connect() -> server gửi WELCOME (id + token) và ROOM_LIST -> hiện sảnh chờ
+2. Tạo / vào phòng -> chờ JOINED rồi mới chuyển sang màn hình game (lỗi thì ở lại sảnh)
+3. Mỗi tick 1/60 s (Online-Tick-Thread):
+     a. ClientPrediction.step(phím) -> vị trí dự đoán ngay lập tức
+     b. gửi INPUT:l:r:u:d:seq
+     c. dựng danh sách vẽ: mình = vị trí dự đoán, người khác = nội suy
+4. Nhận STATE -> lưu snapshot cho nội suy; với nhân vật mình: ClientPrediction.onServerState(x, y, ack)
+5. Mất kết nối -> hiện biểu ngữ, NetClient tự thử lại và gửi RESUME:<token>; thành công thì đồng bộ lại vị trí
+```
 
 ---
 
@@ -73,31 +70,22 @@ source/client/
 
 | Phím | Hành động |
 |------|-----------|
-| `W` / `↑` | Di chuyển lên |
-| `S` / `↓` | Di chuyển xuống |
-| `A` / `←` | Di chuyển trái |
-| `D` / `→` | Di chuyển phải |
-| `J` | Tấn công quái |
+| `W` `A` `S` `D` / mũi tên | Di chuyển (đi chéo tự chuẩn hóa tốc độ) |
+| `ESC` | Thoát về menu |
+| `F3` | Bật/tắt HUD mạng |
+| `F4` | Đổi độ trễ giả lập mỗi chiều (0 / 50 / 100 / 200 / 400 ms) |
+| `F6` | Bật/tắt dự đoán (Prediction) |
+| `F7` | Bật/tắt nội suy (Interpolation) |
+| `F8` | Đổi độ trễ nội suy (50 / 100 / 150 / 250 ms) |
+| `F9` | Giả lập rớt mạng |
 
-Di chuyển chéo (VD: `W + D`) tự động chuẩn hóa tốc độ (nhân `√2/2 ≈ 0.707`).
-
----
-
-## 💡 LUỒNG HOẠT ĐỘNG (ONLINE)
-
-```
-1. Kết nối TCP tới server:8888
-2. Server gửi ROOM_LIST → hiện sảnh chờ
-3. Người chơi tạo/vào phòng
-4. Mỗi khi bấm phím → gửi INPUT lên server
-5. Server tính physics → gửi STATE về
-6. Client nhận STATE → cập nhật renderPlayers → repaint()
-```
+**Gợi ý demo:** bấm `F4` đến 200 ms rồi `F6` để tắt Prediction ⇒ nhân vật phản hồi trễ rõ rệt; bật lại ⇒ phản hồi tức thì
+và HUD vẫn báo sai số reconcile ≈ 0 px.
 
 ---
 
 ## 📝 GHI CHÚ
 
-- Client kết nối mặc định tới `localhost:8888` — nhập IP khác khi chạy
-- Tài nguyên bản đồ (`tileset.png`, `chunk*.tmx`) đọc từ `source/content/map/`
-- Chạy client từ **thư mục gốc project** để đường dẫn tài nguyên hoạt động đúng
+- Chạy client từ **thư mục gốc project** để đường dẫn tài nguyên (`source/content/...`) hoạt động đúng.
+- Muốn thêm thông tin vẽ cho gameplay: `renderPlayers` (map `RenderPlayer`) là nơi `GamePanel.paintComponent` đọc; `ClientApp.handleServerMessage` là nơi thêm xử lý message mới từ server.
+- Chế độ Offline không dùng mạng: physics chạy trực tiếp tại client với `dt` thực.

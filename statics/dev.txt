@@ -1,26 +1,26 @@
-make this doc so that anyone can know what i did in the commit 
+make this doc so that anyone can know what i did in the commit
 reformat the structure , form local to 2 mode:
 - 1 is p2p similar as create room in back for blood or gunfire reborn
-- 2 is dedicated server similar as ark or palworld 
-still has no code 
+- 2 is dedicated server similar as ark or palworld
+still has no code
 ----------------------------------------------------------------------------
-chạy file bằng lệnh trong terminal: run-server.bat và run-client.bat 
+chạy file bằng lệnh trong terminal: run-server.bat và run-client.bat
 in common/src/protocol
-- add command: định nghĩa thao tác điều khiển , demo trái phải 2 cục vuông 
+- add command: định nghĩa thao tác điều khiển , demo trái phải 2 cục vuông
 in server
     main : khởi tạo cổng 8888 lắng nghe các client.
     core/TCPServer :Mở socket lắng nghe và quản lý các kết nối mạng TCP đi vào
-        Sử dụng ServerSocket(8888) chạy trong một luồng riêng. Khi có một Client mới 
-        kết nối (serverSocket.accept()), class này sẽ bàn giao kết nối đó cho ClientHandler 
+        Sử dụng ServerSocket(8888) chạy trong một luồng riêng. Khi có một Client mới
+        kết nối (serverSocket.accept()), class này sẽ bàn giao kết nối đó cho ClientHandler
         và thêm người chơi vào Room
     core/ ClientHandler Quản lý kênh giao tiếp hai chiều (đọc/ghi dữ liệu) với duy nhất một Client.
-        Mỗi Client kết nối vào Server sẽ có 1 luồng ClientHandler riêng. 
+        Mỗi Client kết nối vào Server sẽ có 1 luồng ClientHandler riêng.
 in client
-    main : tạo của sổ jpanel, tạo tcp client và giao diện game panel , hộp thoại jOptionPanel để nhập ip chơi 
+    main : tạo của sổ jpanel, tạo tcp client và giao diện game panel , hộp thoại jOptionPanel để nhập ip chơi
         sau này sẽ dùng zerotier để có thể chơi game online được
     network/TCPClient: Quản lý kết nối mạng TCP từ phía Client tới Server.
-        tạo 1 luồng riêng liên tục lắng nghe chuỗi STATE từ Server trả về, 
-        tách lấy dữ liệu tọa độ p1X, p2X và gọi gamePanel.updatePositions() 
+        tạo 1 luồng riêng liên tục lắng nghe chuỗi STATE từ Server trả về,
+        tách lấy dữ liệu tọa độ p1X, p2X và gọi gamePanel.updatePositions()
         để vẽ lại giao diện. Ngoài ra, nó cung cấp hàm sendMove() để gửi thao tác bấm phím lên Server.
     ui/gamePanel: Xử lý giao diện đồ họa (Java Swing) và nhận đầu vào từ bàn phím người dùng
         tcpClient.sendMove() để gửi lệnh di chuyển lên Server
@@ -29,7 +29,7 @@ in client
 30/10  xóa hết và format lại luôn , tận dung game offline 2d cũ,
  https://github.com/duongakrapovic/2DJavaGame
 đã làm xong xong cho hiện map và vị trí player.
-game play 2.5D , khám phá bản đồ . 
+game play 2.5D , khám phá bản đồ .
 --------------------------------------------------------------------
 31/10  Tái cấu trúc (Refactor) toàn bộ kiến trúc codebase theo hướng hiện đại:
 
@@ -68,9 +68,28 @@ game play 2.5D , khám phá bản đồ .
     - Mặc định khởi động vào màn hình MENU (CardLayout: MENU / LOBBY / GAME)
     - Nền gradient tối phong cách Dungeon, tiêu đề "DUNGEON CO-OP"
     - 3 nút lựa chọn rõ ràng:
-        🎮 Chơi Offline (Luyện tập / Test)   -> startLocalGame()
-        🌐 Chơi Online (Sảnh phòng)           -> connectToServer(host)
-        🚪 Thoát Game                          -> System.exit(0)
+        Chơi Offline (Luyện tập / Test)   -> startLocalGame()
+        Chơi Online (Sảnh phòng)           -> connectToServer(host)
+        Thoát Game                          -> System.exit(0)
     - Nút "⬅ Quay lại Menu" trong Lobby để ngắt kết nối an toàn
     - Phím ESC trong Game hiện hộp thoại xác nhận quay về Menu
-    - Hỗ trợ CLI flag: java -cp . source.client.ClientApp --offline
+    - Hỗ trợ CLI flag: java -cp . source.client.ClientApp --offline
+----------------------------------------------------------------------------------------
+4/11
+[1] Sửa lỗi va chạm vùng tọa độ âm source/common/MapManager.java
+isCollisionAtWorld(int worldX, int worldY)
+
+[2] Thêm volatile để giảm độ trễ điều khiển nút bấm
+source/common/Player.java
+
+[3] Dừng Thread ngầm khi phòng chơi trống (Sửa Thread Leak)
+Gọi stopRoom() finally bên trong ClientHandler.run()
+
+[4] Chuyển dữ liệu hiển thị Swing về luồng EDT
+Đưa thao tác update renderPlayers vào SwingUtilities.invokeLater
+source/client/ClientApp.java
+
+[5] Đồng bộ hóa hàm broadcastState phía Server
+Tránh đứt gãy gói tin khi có người chơi ngắt kết nối đột ngột đúng lúc Server đang duyệt danh sách người chơi.
+File cần sửa: source/server/GameRoom.java
+Vị trí: Phương thức broadcastState()
