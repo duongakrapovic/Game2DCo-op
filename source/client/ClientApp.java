@@ -12,6 +12,7 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.io.*;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.HashMap;
 import java.util.Map;
@@ -60,15 +61,17 @@ public class ClientApp extends JFrame {
     private final Map<String, Image[]> spriteMap = new HashMap<>();
 
     // Danh sách người chơi hiển thị (Thread-safe)
-    private final Map<String, RenderPlayer> renderPlayers = new ConcurrentHashMap<>();
+    private volatile Map<String, RenderPlayer> renderPlayers = new ConcurrentHashMap<>();
     private final Map<String, Long> hitFlashUntil = new ConcurrentHashMap<>();
     private String myName = "Player_" + (int) (Math.random() * 100);
 
     // Network I/O
-    private Socket socket;
-    private PrintWriter out;
-    private BufferedReader in;
-    private Thread netListenThread;
+    private volatile Socket socket;
+    private volatile PrintWriter out;
+    private volatile BufferedReader in;
+    private volatile Thread netListenThread;
+    private final Object networkLock = new Object();
+    private volatile boolean waitingForRoomState;
 
     // Trạng thái phím điều khiển
     private volatile boolean left = false, right = false, up = false, down = false, attack = false;
@@ -218,7 +221,9 @@ public class ClientApp extends JFrame {
 
             String nameInput = JOptionPane.showInputDialog(this, "Nhập Tên người chơi:", myName);
             if (nameInput != null && !nameInput.trim().isEmpty()) {
-                myName = nameInput.trim();
+                String candidateName = nameInput.trim();
+                if (!isValidProtocolField(candidateName, "Tên người chơi")) return;
+                myName = candidateName;
             }
 
             connectToServer(host.trim());
@@ -260,6 +265,21 @@ public class ClientApp extends JFrame {
             }
         });
         return btn;
+    }
+
+    private boolean isValidProtocolField(String value, String fieldName) {
+        if (value.indexOf(':') >= 0 || value.indexOf(';') >= 0 || value.indexOf(',') >= 0
+                || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0) {
+            JOptionPane.showMessageDialog(this,
+                    fieldName + " không được chứa ký tự hai chấm (:), chấm phẩy (;), dấu phẩy (,) hoặc xuống dòng.");
+            return false;
+        }
+        return true;
+    }
+
+    private String roomNameFromDisplay(String displayValue) {
+        int countStart = displayValue.lastIndexOf(" (");
+        return countStart >= 0 ? displayValue.substring(0, countStart) : displayValue;
     }
 
     /**
@@ -304,30 +324,27 @@ public class ClientApp extends JFrame {
         btnPanel.add(btnJoin);
         panel.add(btnPanel, BorderLayout.SOUTH);
 
-        btnRefresh.addActionListener(e -> { 
-            if (out != null) out.println(Common.CMD_ROOM_LIST); 
-        });
+        btnRefresh.addActionListener(e -> sendCommand(Common.CMD_ROOM_LIST));
 
         btnCreate.addActionListener(e -> {
             String rName = JOptionPane.showInputDialog(this, "Nhập tên phòng:");
             if (rName != null && !rName.trim().isEmpty()) {
-                if (out != null) {
-                    out.println(Common.CMD_CREATE_ROOM + ":" + rName.trim() + ":" + myName);
-                    cardLayout.show(mainContainer, "GAME");
-                    gamePanel.requestFocusInWindow();
-                }
+                String roomName = rName.trim();
+                if (!isValidProtocolField(roomName, "Tên phòng")
+                        || !isValidProtocolField(myName, "Tên người chơi")) return;
+                waitingForRoomState = true;
+                sendCommand(Common.CMD_CREATE_ROOM + ":" + roomName + ":" + myName);
             }
         });
 
         btnJoin.addActionListener(e -> {
             String selected = roomJList.getSelectedValue();
             if (selected != null) {
-                String rName = selected.split(" ")[0];
-                if (out != null) {
-                    out.println(Common.CMD_JOIN_ROOM + ":" + rName + ":" + myName);
-                    cardLayout.show(mainContainer, "GAME");
-                    gamePanel.requestFocusInWindow();
-                }
+                String roomName = roomNameFromDisplay(selected);
+                if (!isValidProtocolField(roomName, "Tên phòng")
+                        || !isValidProtocolField(myName, "Tên người chơi")) return;
+                waitingForRoomState = true;
+                sendCommand(Common.CMD_JOIN_ROOM + ":" + roomName + ":" + myName);
             } else {
                 JOptionPane.showMessageDialog(this, "Vui lòng chọn 1 phòng trong danh sách!");
             }
@@ -449,89 +466,188 @@ public class ClientApp extends JFrame {
 
         isOfflineMode = false;
         setTitle("Dungeon Co-op Game [ONLINE - " + host + "]");
+        renderPlayers = new ConcurrentHashMap<>();
 
+        Socket newSocket = new Socket();
         try {
-            socket = new Socket(host, Common.PORT);
-            out = new PrintWriter(socket.getOutputStream(), true);
-            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            newSocket.connect(new InetSocketAddress(host, Common.PORT), 5000);
+            PrintWriter newOut = new PrintWriter(newSocket.getOutputStream(), true);
+            BufferedReader newIn = new BufferedReader(new InputStreamReader(newSocket.getInputStream()));
 
-            netListenThread = new Thread(() -> {
-                try {
-                    String line;
-                    while ((line = in.readLine()) != null) {
-                        if (line.startsWith(Common.CMD_ROOM_LIST)) {
-                            String[] items = line.split(";");
-                            SwingUtilities.invokeLater(() -> {
-                                roomListModel.clear();
-                                for (int i = 1; i < items.length; i++) {
-                                    roomListModel.addElement(items[i]);
-                                }
-                            });
-                        } else if (line.startsWith(Common.CMD_STATE)) {
-                            String[] items = line.split(";");
-                            renderPlayers.clear();
-                            for (int i = 1; i < items.length; i++) {
-                                String[] pData = items[i].split(",");
-                                if (pData.length >= 6) {
-                                    renderPlayers.put(pData[0], new RenderPlayer(
-                                        pData[1], 
-                                        Integer.parseInt(pData[2]), 
-                                        Integer.parseInt(pData[3]), 
-                                        pData[4], 
-                                        Integer.parseInt(pData[5]),
-                                        pData[0].startsWith("E_"),
-                                        pData.length >= 7 ? Integer.parseInt(pData[6]) : 100,
-                                        pData.length >= 8 ? Integer.parseInt(pData[7]) : 100,
-                                        hitFlashUntil.getOrDefault(pData[0], 0L)
-                                    ));
-                                }
-                            }
-                            gamePanel.repaint();
-                        } else if (line.startsWith(Common.CMD_PLAYER_DAMAGE + ":")
-                                || line.startsWith(Common.CMD_ENEMY_DAMAGE + ":")) {
-                            String[] damage = line.split(":");
-                            if (damage.length >= 4) {
-                                String targetId = damage[1];
-                                int currentHealth = Integer.parseInt(damage[3]);
-                                long flashUntil = System.currentTimeMillis() + 150;
-                                hitFlashUntil.put(targetId, flashUntil);
-                                RenderPlayer target = renderPlayers.get(targetId);
-                                if (target != null) {
-                                    target.health = Math.max(0, Math.min(target.maxHealth, currentHealth));
-                                    target.flashUntil = flashUntil;
-                                }
-                                gamePanel.repaint();
-                            }
-                        } else if (line.startsWith(Common.CMD_ERROR)) {
-                            String errorMsg = line.split(":")[1];
-                            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, errorMsg));
-                        }
-                    }
-                } catch (Exception ignored) {
-                } finally {
-                    disconnectNetwork();
-                }
-            }, "Client-Net-Listen-Thread");
+            synchronized (networkLock) {
+                socket = newSocket;
+                out = newOut;
+                in = newIn;
+            }
 
-            netListenThread.start();
-            out.println(Common.CMD_ROOM_LIST);
+            Thread listener = new Thread(() -> listenForServerMessages(newSocket, newIn),
+                    "Client-Net-Listen-Thread");
+            synchronized (networkLock) {
+                netListenThread = listener;
+            }
+            listener.start();
+            sendCommand(Common.CMD_ROOM_LIST);
             cardLayout.show(mainContainer, "LOBBY");
 
         } catch (IOException ex) {
+            closeNetworkResources(newSocket, null, null);
             JOptionPane.showMessageDialog(this, "Không thể kết nối tới Server: " + ex.getMessage());
             cardLayout.show(mainContainer, "MENU");
         }
     }
 
-    private void disconnectNetwork() {
+    private void listenForServerMessages(Socket sessionSocket, BufferedReader sessionIn) {
         try {
-            if (socket != null && !socket.isClosed()) socket.close();
-            if (out != null) out.close();
-            if (in != null) in.close();
-        } catch (IOException ignored) {}
-        socket = null;
-        out = null;
-        in = null;
+            String line;
+            while ((line = sessionIn.readLine()) != null) {
+                handleServerMessage(line, sessionSocket);
+            }
+        } catch (IOException ex) {
+            if (!sessionSocket.isClosed()) {
+                System.err.println("[Client] Kết nối server bị ngắt: " + ex.getMessage());
+            }
+        } finally {
+            boolean connectionWasCurrent;
+            synchronized (networkLock) {
+                connectionWasCurrent = socket == sessionSocket;
+            }
+            disconnectNetwork(sessionSocket);
+            if (connectionWasCurrent) {
+                SwingUtilities.invokeLater(() -> {
+                    if (!isDisplayable()) return;
+                    cardLayout.show(mainContainer, "MENU");
+                    setTitle("Dungeon Co-op Game");
+                    JOptionPane.showMessageDialog(this, "Mất kết nối tới server.");
+                });
+            }
+        }
+    }
+
+    private void handleServerMessage(String line, Socket sessionSocket) {
+        if (line.equals(Common.CMD_ROOM_LIST) || line.startsWith(Common.CMD_ROOM_LIST + ";")) {
+            String[] items = line.split(";", -1);
+            SwingUtilities.invokeLater(() -> {
+                roomListModel.clear();
+                for (int i = 1; i < items.length; i++) {
+                    if (!items[i].isEmpty()) roomListModel.addElement(items[i]);
+                }
+            });
+            return;
+        }
+
+        if (line.equals(Common.CMD_STATE) || line.startsWith(Common.CMD_STATE + ";")) {
+            Map<String, RenderPlayer> updatedPlayers = new ConcurrentHashMap<>();
+            String[] items = line.split(";", -1);
+            for (int i = 1; i < items.length; i++) {
+                String[] playerData = items[i].split(",", -1);
+                if (playerData.length < 6) continue;
+                try {
+                    int health = playerData.length >= 7 ? Integer.parseInt(playerData[6]) : 100;
+                    int maxHealth = playerData.length >= 8 ? Integer.parseInt(playerData[7]) : 100;
+                    updatedPlayers.put(playerData[0], new RenderPlayer(
+                            playerData[1], Integer.parseInt(playerData[2]),
+                            Integer.parseInt(playerData[3]), playerData[4],
+                            Integer.parseInt(playerData[5]), playerData[0].startsWith("E_"),
+                            health, maxHealth,
+                            hitFlashUntil.getOrDefault(playerData[0], 0L)));
+                } catch (NumberFormatException ignored) {
+                    System.err.println("[Client] Bỏ qua state không hợp lệ: " + items[i]);
+                }
+            }
+            renderPlayers = updatedPlayers;
+            if (waitingForRoomState) {
+                waitingForRoomState = false;
+                SwingUtilities.invokeLater(() -> {
+                    if (socket == sessionSocket) {
+                        cardLayout.show(mainContainer, "GAME");
+                        gamePanel.requestFocusInWindow();
+                    }
+                });
+            }
+            gamePanel.repaint();
+            return;
+        }
+
+        if (line.startsWith(Common.CMD_PLAYER_DAMAGE + ":")
+                || line.startsWith(Common.CMD_ENEMY_DAMAGE + ":")) {
+            String[] damage = line.split(":", 4);
+            if (damage.length >= 4) {
+                try {
+                    String targetId = damage[1];
+                    int currentHealth = Integer.parseInt(damage[3]);
+                    long flashUntil = System.currentTimeMillis() + 150;
+                    hitFlashUntil.put(targetId, flashUntil);
+                    RenderPlayer target = renderPlayers.get(targetId);
+                    if (target != null) {
+                        target.health = Math.max(0, Math.min(target.maxHealth, currentHealth));
+                        target.flashUntil = flashUntil;
+                    }
+                    gamePanel.repaint();
+                } catch (NumberFormatException ignored) {
+                    System.err.println("[Client] Bỏ qua damage event không hợp lệ: " + line);
+                }
+            }
+            return;
+        }
+
+        if (line.startsWith(Common.CMD_ERROR + ":")) {
+            String[] error = line.split(":", 2);
+            String errorMessage = error.length > 1 ? error[1] : "Lỗi từ server.";
+            boolean wasWaitingForRoom = waitingForRoomState;
+            waitingForRoomState = false;
+            SwingUtilities.invokeLater(() -> {
+                if (wasWaitingForRoom && socket == sessionSocket) {
+                    cardLayout.show(mainContainer, "LOBBY");
+                }
+                JOptionPane.showMessageDialog(this, errorMessage);
+            });
+        }
+    }
+
+    private void sendCommand(String command) {
+        PrintWriter writer = out;
+        if (writer != null) writer.println(command);
+    }
+
+    private void disconnectNetwork() {
+        disconnectNetwork(null);
+    }
+
+    private void disconnectNetwork(Socket expectedSocket) {
+        Socket socketToClose;
+        PrintWriter writerToClose = null;
+        BufferedReader readerToClose = null;
+        synchronized (networkLock) {
+            if (expectedSocket != null && socket != expectedSocket) {
+                socketToClose = expectedSocket;
+            } else {
+                socketToClose = socket;
+                writerToClose = out;
+                readerToClose = in;
+                socket = null;
+                out = null;
+                in = null;
+                netListenThread = null;
+                waitingForRoomState = false;
+                left = right = up = down = attack = false;
+            }
+        }
+        closeNetworkResources(socketToClose, writerToClose, readerToClose);
+    }
+
+    private void closeNetworkResources(Socket socketToClose, PrintWriter writerToClose,
+                                       BufferedReader readerToClose) {
+        if (socketToClose != null) {
+            try {
+                socketToClose.close();
+            } catch (IOException ignored) { }
+        }
+        if (writerToClose != null) writerToClose.close();
+        if (readerToClose != null) {
+            try {
+                readerToClose.close();
+            } catch (IOException ignored) { }
+        }
     }
 
     private void handleEscapeKey() {
@@ -609,9 +725,7 @@ public class ClientApp extends JFrame {
             case "down":  down  = isPressed; break;
             case "attack": attack = isPressed; break;
         }
-        if (!isOfflineMode && out != null) {
-            out.println(Common.CMD_INPUT + ":" + left + ":" + right + ":" + up + ":" + down + ":" + attack);
-        }
+        if (!isOfflineMode) sendInputState();
     }
 
     private void updateKey(int keyCode, boolean isPressed) {
@@ -623,8 +737,12 @@ public class ClientApp extends JFrame {
 
         if (!isOfflineMode && out != null) {
             // Gửi dữ liệu điều khiển lên Server khi ở chế độ Online
-            out.println(Common.CMD_INPUT + ":" + left + ":" + right + ":" + up + ":" + down + ":" + attack);
+            sendInputState();
         }
+    }
+
+    private void sendInputState() {
+        sendCommand(Common.CMD_INPUT + ":" + left + ":" + right + ":" + up + ":" + down + ":" + attack);
     }
 
     private class GamePanel extends JPanel {
@@ -636,13 +754,14 @@ public class ClientApp extends JFrame {
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
             Graphics2D g2 = (Graphics2D) g;
+            Map<String, RenderPlayer> snapshot = renderPlayers;
 
             int myX = (int) Common.SPAWN_X;
             int myY = (int) Common.SPAWN_Y;
             int myHealth = Player.MAX_HEALTH;
             int myMaxHealth = Player.MAX_HEALTH;
 
-            for (RenderPlayer p : renderPlayers.values()) {
+            for (RenderPlayer p : snapshot.values()) {
                 if (p.name.equals(myName)) {
                     myX = p.x;
                     myY = p.y;
@@ -671,7 +790,7 @@ public class ClientApp extends JFrame {
 
             int playerRenderSize = (int) (16 * Common.SCALE); // Kích thước hiển thị nhân vật
 
-            for (RenderPlayer p : renderPlayers.values()) {
+            for (RenderPlayer p : snapshot.values()) {
                 int screenX = p.x - camX;
                 int screenY = p.y - camY;
 
