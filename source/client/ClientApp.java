@@ -17,6 +17,8 @@ import java.net.Socket;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class ClientApp extends JFrame {
 
@@ -70,7 +72,14 @@ public class ClientApp extends JFrame {
     private volatile PrintWriter out;
     private volatile BufferedReader in;
     private volatile Thread netListenThread;
+    private volatile Socket connectingSocket;
+    private volatile long connectionAttempt;
     private final Object networkLock = new Object();
+    private final ExecutorService networkSendExecutor = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "Client-Net-Send-Thread");
+        thread.setDaemon(true);
+        return thread;
+    });
     private volatile boolean waitingForRoomState;
 
     // Trạng thái phím điều khiển
@@ -132,6 +141,7 @@ public class ClientApp extends JFrame {
             public void windowClosing(WindowEvent e) {
                 stopLocalGame();
                 disconnectNetwork();
+                networkSendExecutor.shutdownNow();
             }
         });
     }
@@ -465,35 +475,68 @@ public class ClientApp extends JFrame {
         disconnectNetwork();
 
         isOfflineMode = false;
-        setTitle("Dungeon Co-op Game [ONLINE - " + host + "]");
+        setTitle("Dungeon Co-op Game [CONNECTING - " + host + "]");
         renderPlayers = new ConcurrentHashMap<>();
 
-        Socket newSocket = new Socket();
-        try {
-            newSocket.connect(new InetSocketAddress(host, Common.PORT), 5000);
-            PrintWriter newOut = new PrintWriter(newSocket.getOutputStream(), true);
-            BufferedReader newIn = new BufferedReader(new InputStreamReader(newSocket.getInputStream()));
-
-            synchronized (networkLock) {
-                socket = newSocket;
-                out = newOut;
-                in = newIn;
-            }
-
-            Thread listener = new Thread(() -> listenForServerMessages(newSocket, newIn),
-                    "Client-Net-Listen-Thread");
-            synchronized (networkLock) {
-                netListenThread = listener;
-            }
-            listener.start();
-            sendCommand(Common.CMD_ROOM_LIST);
-            cardLayout.show(mainContainer, "LOBBY");
-
-        } catch (IOException ex) {
-            closeNetworkResources(newSocket, null, null);
-            JOptionPane.showMessageDialog(this, "Không thể kết nối tới Server: " + ex.getMessage());
-            cardLayout.show(mainContainer, "MENU");
+        Socket attemptSocket = new Socket();
+        long attempt;
+        synchronized (networkLock) {
+            attempt = ++connectionAttempt;
+            connectingSocket = attemptSocket;
         }
+
+        Thread connectThread = new Thread(() -> {
+            try {
+                attemptSocket.connect(new InetSocketAddress(host, Common.PORT), 5000);
+                PrintWriter attemptOut = new PrintWriter(attemptSocket.getOutputStream(), true);
+                BufferedReader attemptIn = new BufferedReader(new InputStreamReader(attemptSocket.getInputStream()));
+                SwingUtilities.invokeLater(() -> completeConnection(
+                        attempt, attemptSocket, attemptOut, attemptIn, host));
+            } catch (IOException ex) {
+                closeNetworkResources(attemptSocket, null, null);
+                SwingUtilities.invokeLater(() -> failConnection(attempt, attemptSocket, host, ex));
+            }
+        }, "Client-Net-Connect-Thread");
+        connectThread.setDaemon(true);
+        connectThread.start();
+    }
+
+    private void completeConnection(long attempt, Socket connectedSocket,
+                                    PrintWriter connectedOut, BufferedReader connectedIn,
+                                    String host) {
+        synchronized (networkLock) {
+            if (attempt != connectionAttempt || connectingSocket != connectedSocket
+                    || connectedSocket.isClosed()) {
+                closeNetworkResources(connectedSocket, connectedOut, connectedIn);
+                return;
+            }
+            socket = connectedSocket;
+            out = connectedOut;
+            in = connectedIn;
+            connectingSocket = null;
+        }
+
+        Thread listener = new Thread(() -> listenForServerMessages(connectedSocket, connectedIn),
+                "Client-Net-Listen-Thread");
+        synchronized (networkLock) {
+            netListenThread = listener;
+        }
+        listener.setDaemon(true);
+        listener.start();
+        setTitle("Dungeon Co-op Game [ONLINE - " + host + "]");
+        cardLayout.show(mainContainer, "LOBBY");
+        sendCommand(Common.CMD_ROOM_LIST);
+    }
+
+    private void failConnection(long attempt, Socket attemptSocket, String host, IOException error) {
+        synchronized (networkLock) {
+            if (attempt != connectionAttempt || connectingSocket != attemptSocket) return;
+            connectingSocket = null;
+        }
+        setTitle("Dungeon Co-op Game");
+        cardLayout.show(mainContainer, "MENU");
+        JOptionPane.showMessageDialog(this,
+                "Không thể kết nối tới Server " + host + ": " + error.getMessage());
     }
 
     private void listenForServerMessages(Socket sessionSocket, BufferedReader sessionIn) {
@@ -524,6 +567,7 @@ public class ClientApp extends JFrame {
     }
 
     private void handleServerMessage(String line, Socket sessionSocket) {
+        if (socket != sessionSocket) return;
         if (line.equals(Common.CMD_ROOM_LIST) || line.startsWith(Common.CMD_ROOM_LIST + ";")) {
             String[] items = line.split(";", -1);
             SwingUtilities.invokeLater(() -> {
@@ -605,8 +649,18 @@ public class ClientApp extends JFrame {
     }
 
     private void sendCommand(String command) {
+        Socket targetSocket = socket;
         PrintWriter writer = out;
-        if (writer != null) writer.println(command);
+        if (targetSocket == null || writer == null) return;
+        try {
+            networkSendExecutor.execute(() -> {
+                if (socket != targetSocket || targetSocket.isClosed()) return;
+                writer.println(command);
+                if (writer.checkError()) {
+                    System.err.println("[Client] Không gửi được lệnh tới server.");
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) { }
     }
 
     private void disconnectNetwork() {
@@ -615,13 +669,17 @@ public class ClientApp extends JFrame {
 
     private void disconnectNetwork(Socket expectedSocket) {
         Socket socketToClose;
+        Socket pendingSocketToClose = null;
         PrintWriter writerToClose = null;
         BufferedReader readerToClose = null;
         synchronized (networkLock) {
             if (expectedSocket != null && socket != expectedSocket) {
                 socketToClose = expectedSocket;
             } else {
+                connectionAttempt++;
                 socketToClose = socket;
+                pendingSocketToClose = connectingSocket;
+                connectingSocket = null;
                 writerToClose = out;
                 readerToClose = in;
                 socket = null;
@@ -633,10 +691,26 @@ public class ClientApp extends JFrame {
             }
         }
         closeNetworkResources(socketToClose, writerToClose, readerToClose);
+        if (pendingSocketToClose != socketToClose) {
+            closeNetworkResources(pendingSocketToClose, null, null);
+        }
     }
 
     private void closeNetworkResources(Socket socketToClose, PrintWriter writerToClose,
                                        BufferedReader readerToClose) {
+        if (SwingUtilities.isEventDispatchThread()) {
+            Thread closeThread = new Thread(
+                    () -> closeNetworkResourcesNow(socketToClose, writerToClose, readerToClose),
+                    "Client-Net-Close-Thread");
+            closeThread.setDaemon(true);
+            closeThread.start();
+            return;
+        }
+        closeNetworkResourcesNow(socketToClose, writerToClose, readerToClose);
+    }
+
+    private void closeNetworkResourcesNow(Socket socketToClose, PrintWriter writerToClose,
+                                          BufferedReader readerToClose) {
         if (socketToClose != null) {
             try {
                 socketToClose.close();
