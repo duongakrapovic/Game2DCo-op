@@ -37,11 +37,6 @@ public class ClientMovement {
     private final Map<String, List<Snap>> playerSnaps = new ConcurrentHashMap<>();
 
     private int nextSeq = 0;
-    private float maxErrorObserved = 0;
-    private int correctionCount = 0;
-
-    private boolean predictionEnabled = true;
-    private boolean interpolationEnabled = true;
     private long interpolationDelayMs = 100;
 
     public ClientMovement(GameMap mapManager) {
@@ -51,15 +46,13 @@ public class ClientMovement {
 
     public synchronized PredictionInput step(boolean l, boolean r, boolean u, boolean d, boolean atk) {
         PredictionInput input = new PredictionInput(nextSeq++, l, r, u, d, atk);
-        if (predictionEnabled) {
-            pendingInputs.add(input);
-            localPlayer.left = l;
-            localPlayer.right = r;
-            localPlayer.up = u;
-            localPlayer.down = d;
-            localPlayer.isAttacking = atk;
-            GamePhysics.updatePlayer(localPlayer, mapManager);
-        }
+        pendingInputs.add(input);
+        localPlayer.left = l;
+        localPlayer.right = r;
+        localPlayer.up = u;
+        localPlayer.down = d;
+        localPlayer.isAttacking = atk;
+        GamePhysics.updatePlayer(localPlayer, mapManager);
         return input;
     }
 
@@ -69,10 +62,8 @@ public class ClientMovement {
         }
 
         float err = (float) Math.hypot(localPlayer.x - serverX, localPlayer.y - serverY);
-        if (err > maxErrorObserved) maxErrorObserved = err;
 
         if (err > 1.5f) {
-            correctionCount++;
             localPlayer.x = serverX;
             localPlayer.y = serverY;
 
@@ -98,10 +89,6 @@ public class ClientMovement {
         List<Snap> list = playerSnaps.get(id);
         if (list == null || list.isEmpty()) return null;
 
-        if (!interpolationEnabled) {
-            return list.get(list.size() - 1);
-        }
-
         long renderTime = System.currentTimeMillis() - interpolationDelayMs;
 
         for (int i = list.size() - 1; i >= 0; i--) {
@@ -124,12 +111,4 @@ public class ClientMovement {
 
     public float x() { return localPlayer.x; }
     public float y() { return localPlayer.y; }
-    public int pendingCount() { return pendingInputs.size(); }
-    public float maxError() { return maxErrorObserved; }
-    public int correctionCount() { return correctionCount; }
-    public boolean isPredictionEnabled() { return predictionEnabled; }
-    public void setPredictionEnabled(boolean enabled) { this.predictionEnabled = enabled; }
-    public boolean isInterpolationEnabled() { return interpolationEnabled; }
-    public void setInterpolationEnabled(boolean enabled) { this.interpolationEnabled = enabled; }
-    public long getInterpolationDelayMs() { return interpolationDelayMs; }
 }

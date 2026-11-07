@@ -5,7 +5,9 @@ import source.common.GameProtocol;
 import java.io.*;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class ClientNetwork {
     public enum State { CONNECTING, CONNECTED, RECONNECTING, CLOSED }
@@ -27,15 +29,13 @@ public class ClientNetwork {
     private volatile boolean running = false;
 
     private String myId = null;
-    private String sessionToken = null;
-    private long reconnectCount = 0;
-
-    private double rttMs = 0;
-    private double jitterMs = 0;
-    private long lastPingSentTime = 0;
-
-    private int simulatedLagMs = 0;
-    private final ScheduledExecutorService lagScheduler = Executors.newScheduledThreadPool(1);
+    private volatile String sessionToken = null;
+    private final ScheduledExecutorService heartbeatScheduler =
+            Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "Network-Heartbeat");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     public ClientNetwork(String host, int port, Listener listener) {
         this.host = host;
@@ -46,6 +46,11 @@ public class ClientNetwork {
     public synchronized void connect() {
         if (running) return;
         running = true;
+        heartbeatScheduler.scheduleAtFixedRate(() -> {
+            if (state == State.CONNECTED) {
+                sendRaw("PING:" + System.nanoTime());
+            }
+        }, 1, 1, TimeUnit.SECONDS);
         changeState(State.CONNECTING, "Đang kết nối tới " + host + ":" + port);
         new Thread(this::connectionLoop, "NetClient-Loop").start();
     }
@@ -71,15 +76,6 @@ public class ClientNetwork {
 
                 changeState(State.CONNECTED, "Đã kết nối");
                 attempt = 0;
-                reconnectCount++;
-
-                ScheduledExecutorService pingExec = Executors.newSingleThreadScheduledExecutor();
-                pingExec.scheduleAtFixedRate(() -> {
-                    if (socket != null && socket.isConnected() && !socket.isClosed()) {
-                        lastPingSentTime = System.nanoTime();
-                        sendRaw("PING:" + lastPingSentTime);
-                    }
-                }, 1000, 1000, TimeUnit.MILLISECONDS);
 
                 String line;
                 while ((line = GameProtocol.readLineLimited(in, GameProtocol.MAX_LINE_LENGTH_SERVER)) != null) {
@@ -88,23 +84,10 @@ public class ClientNetwork {
                         String[] p = msg.split(":");
                         if (p.length >= 2) myId = p[1];
                         if (p.length >= 3) sessionToken = p[2];
-                    } else if (msg.startsWith("PONG:")) {
-                        try {
-                            long sent = Long.parseLong(msg.substring(5));
-                            double rtt = (System.nanoTime() - sent) / 1e6;
-                            jitterMs = Math.abs(rtt - rttMs) * 0.2 + jitterMs * 0.8;
-                            rttMs = rtt;
-                        } catch (Exception ignored) {}
                     }
 
-                    if (simulatedLagMs > 0) {
-                        lagScheduler.schedule(() -> listener.onMessage(msg), simulatedLagMs, TimeUnit.MILLISECONDS);
-                    } else {
-                        listener.onMessage(msg);
-                    }
+                    listener.onMessage(msg);
                 }
-
-                pingExec.shutdownNow();
             } catch (Exception e) {
                 if (!running) break;
                 attempt++;
@@ -116,33 +99,20 @@ public class ClientNetwork {
     }
 
     public void send(String msg) {
-        if (simulatedLagMs > 0) {
-            lagScheduler.schedule(() -> sendRaw(msg), simulatedLagMs, TimeUnit.MILLISECONDS);
-        } else {
-            sendRaw(msg);
-        }
+        sendRaw(msg);
     }
 
     private synchronized void sendRaw(String msg) {
-        if (out != null && socket != null && socket.isConnected()) {
+        if (out != null && socket != null && socket.isConnected() && !socket.isClosed()) {
             out.print(msg + "\n");
             out.flush();
+            if (out.checkError()) closeQuietly();
         }
     }
 
-    public void simulateConnectionDrop() {
-        try {
-            if (socket != null) socket.close();
-        } catch (Exception ignored) {}
-    }
-
-    public void setLagMs(int ms) { this.simulatedLagMs = ms; }
-    public int getLagMs() { return simulatedLagMs; }
-    public double getRttMs() { return rttMs; }
-    public double getJitterMs() { return jitterMs; }
     public String getMyId() { return myId; }
+    public String getSessionToken() { return sessionToken; }
     public State getState() { return state; }
-    public long getReconnectCount() { return reconnectCount; }
 
     private void changeState(State s, String info) {
         this.state = s;
@@ -151,8 +121,8 @@ public class ClientNetwork {
 
     public synchronized void close() {
         running = false;
+        heartbeatScheduler.shutdownNow();
         closeQuietly();
-        lagScheduler.shutdownNow();
     }
 
     private void closeQuietly() {

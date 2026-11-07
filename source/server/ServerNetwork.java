@@ -9,10 +9,15 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketAddress;
+import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -23,9 +28,22 @@ public class ServerNetwork {
     private final ServerApp app;
     private final AtomicInteger playerCounter = new AtomicInteger(1);
     private final Set<ClientHandler> connectedClients = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, SocketAddress> voicePeersByPlayer = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<SocketAddress, String> voicePlayersByAddress = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> voiceRoomsByPlayer = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ClientHandler> voiceHandlersByPlayer = new ConcurrentHashMap<>();
     private volatile ServerSocket serverSocket;
+    private volatile DatagramSocket voiceSocket;
     private volatile boolean running;
     private Thread acceptThread;
+    private Thread voiceThread;
+
+    private static final byte[] VOICE_MAGIC = {'V', 'C', 'H', '1'};
+    private static final byte VOICE_REGISTER = 1;
+    private static final byte VOICE_AUDIO = 2;
+    private static final byte VOICE_ACK = 3;
+    private static final int VOICE_HEADER_BYTES = VOICE_MAGIC.length + 1;
+    private static final int MAX_VOICE_PACKET_BYTES = 1200;
 
     public ServerNetwork(int port, ServerApp app) {
         this.port = port;
@@ -37,14 +55,34 @@ public class ServerNetwork {
             return;
         }
 
-        ServerSocket listener = new ServerSocket();
-        listener.setReuseAddress(true);
-        listener.bind(new InetSocketAddress(port));
-        serverSocket = listener;
-        running = true;
+        DatagramSocket voiceListener = new DatagramSocket(null);
+        ServerSocket listener = null;
+        try {
+            voiceListener.setReuseAddress(true);
+            voiceListener.bind(new InetSocketAddress(port));
 
-        acceptThread = new Thread(this::acceptConnections, "TCP-Acceptor");
-        acceptThread.start();
+            listener = new ServerSocket();
+            listener.setReuseAddress(true);
+            listener.bind(new InetSocketAddress(port));
+            serverSocket = listener;
+            voiceSocket = voiceListener;
+            running = true;
+
+            acceptThread = new Thread(this::acceptConnections, "TCP-Acceptor");
+            acceptThread.start();
+            voiceThread = new Thread(this::receiveVoicePackets, "UDP-Voice-Relay");
+            voiceThread.start();
+        } catch (IOException e) {
+            if (listener != null) {
+                try {
+                    listener.close();
+                } catch (IOException closeError) {
+                    e.addSuppressed(closeError);
+                }
+            }
+            voiceListener.close();
+            throw e;
+        }
     }
 
     private void acceptConnections() {
@@ -80,6 +118,9 @@ public class ServerNetwork {
                 System.err.println("[ServerNetwork] Loi dong ServerSocket: " + e.getMessage());
             }
         }
+        DatagramSocket voiceListener = voiceSocket;
+        voiceSocket = null;
+        if (voiceListener != null) voiceListener.close();
 
         for (ClientHandler client : connectedClients) {
             client.close();
@@ -89,6 +130,126 @@ public class ServerNetwork {
         if (acceptThread != null) {
             acceptThread.interrupt();
             acceptThread = null;
+        }
+        if (voiceThread != null) {
+            voiceThread.interrupt();
+            voiceThread = null;
+        }
+        voicePlayersByAddress.clear();
+        voicePeersByPlayer.clear();
+        voiceRoomsByPlayer.clear();
+        voiceHandlersByPlayer.clear();
+    }
+
+    private void receiveVoicePackets() {
+        byte[] buffer = new byte[MAX_VOICE_PACKET_BYTES];
+        while (running) {
+            DatagramSocket socket = voiceSocket;
+            if (socket == null) return;
+            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+            try {
+                socket.receive(packet);
+                if (packet.getLength() < VOICE_HEADER_BYTES || !hasVoiceMagic(packet.getData())) {
+                    continue;
+                }
+
+                byte type = packet.getData()[VOICE_MAGIC.length];
+                if (type == VOICE_REGISTER) {
+                    registerVoiceEndpoint(packet);
+                } else if (type == VOICE_AUDIO && packet.getLength() > VOICE_HEADER_BYTES
+                        && packet.getLength() <= MAX_VOICE_PACKET_BYTES) {
+                    relayVoicePacket(packet);
+                }
+            } catch (SocketException e) {
+                if (running) System.err.println("[ServerNetwork] Loi UDP voice: " + e.getMessage());
+                return;
+            } catch (IOException e) {
+                if (running) System.err.println("[ServerNetwork] Loi UDP voice: " + e.getMessage());
+            }
+        }
+    }
+
+    private void registerVoiceEndpoint(DatagramPacket packet) {
+        int tokenLength = packet.getLength() - VOICE_HEADER_BYTES;
+        if (tokenLength <= 0 || tokenLength > 128) return;
+        String token = new String(packet.getData(), packet.getOffset() + VOICE_HEADER_BYTES,
+                tokenLength, StandardCharsets.UTF_8);
+        ServerSession session = app.getSessionByToken(token);
+        if (session == null) return;
+
+        ClientHandler handler = session.getClientHandler();
+        String roomId = session.getRoomId();
+        if (handler == null || roomId == null || !handler.isVoiceRoomMember(roomId)) return;
+
+        String playerId = session.getPlayerId();
+        SocketAddress address = packet.getSocketAddress();
+        synchronized (this) {
+            SocketAddress previousAddress = voicePeersByPlayer.put(playerId, address);
+            if (previousAddress != null) voicePlayersByAddress.remove(previousAddress, playerId);
+            String previousPlayer = voicePlayersByAddress.put(address, playerId);
+            if (previousPlayer != null && !previousPlayer.equals(playerId)) {
+                voicePeersByPlayer.remove(previousPlayer, address);
+                voiceRoomsByPlayer.remove(previousPlayer);
+                voiceHandlersByPlayer.remove(previousPlayer);
+            }
+            voiceRoomsByPlayer.put(playerId, roomId);
+            voiceHandlersByPlayer.put(playerId, handler);
+        }
+        sendVoicePacket(createVoicePacket(VOICE_ACK, new byte[0]), address);
+    }
+
+    private void relayVoicePacket(DatagramPacket packet) {
+        String senderId = voicePlayersByAddress.get(packet.getSocketAddress());
+        String senderRoom = senderId == null ? null : voiceRoomsByPlayer.get(senderId);
+        ClientHandler senderHandler = senderId == null ? null : voiceHandlersByPlayer.get(senderId);
+        if (senderRoom == null || senderHandler == null
+                || !senderHandler.isVoiceRoomMember(senderRoom)) return;
+
+        byte[] data = Arrays.copyOfRange(packet.getData(), packet.getOffset(),
+                packet.getOffset() + packet.getLength());
+        for (var peer : voicePeersByPlayer.entrySet()) {
+            String playerId = peer.getKey();
+            String roomId = voiceRoomsByPlayer.get(playerId);
+            ClientHandler handler = voiceHandlersByPlayer.get(playerId);
+            if (!playerId.equals(senderId) && senderRoom.equals(roomId)
+                    && handler != null && handler.isVoiceRoomMember(roomId)) {
+                sendVoicePacket(data, peer.getValue());
+            }
+        }
+    }
+
+    private void sendVoicePacket(byte[] data, SocketAddress address) {
+        DatagramSocket socket = voiceSocket;
+        if (socket == null || socket.isClosed()) return;
+        try {
+            socket.send(new DatagramPacket(data, data.length, address));
+        } catch (IOException e) {
+            if (running) System.err.println("[ServerNetwork] Loi gui UDP voice: " + e.getMessage());
+        }
+    }
+
+    private boolean hasVoiceMagic(byte[] data) {
+        for (int i = 0; i < VOICE_MAGIC.length; i++) {
+            if (data[i] != VOICE_MAGIC[i]) return false;
+        }
+        return true;
+    }
+
+    private static byte[] createVoicePacket(byte type, byte[] payload) {
+        byte[] packet = new byte[VOICE_HEADER_BYTES + payload.length];
+        System.arraycopy(VOICE_MAGIC, 0, packet, 0, VOICE_MAGIC.length);
+        packet[VOICE_MAGIC.length] = type;
+        System.arraycopy(payload, 0, packet, VOICE_HEADER_BYTES, payload.length);
+        return packet;
+    }
+
+    private synchronized void removeVoicePeer(ClientHandler handler) {
+        String playerId = handler.playerId;
+        if (voiceHandlersByPlayer.get(playerId) == handler) {
+            SocketAddress address = voicePeersByPlayer.remove(playerId);
+            if (address != null) voicePlayersByAddress.remove(address, playerId);
+            voiceRoomsByPlayer.remove(playerId);
+            voiceHandlersByPlayer.remove(playerId, handler);
         }
     }
 
@@ -160,6 +321,7 @@ public class ServerNetwork {
                 }
             } finally {
                 connectedClients.remove(this);
+                removeVoicePeer(this);
                 if (currentRoom != null) {
                     currentRoom.detachPlayerHandler(playerId, this);
                     currentRoom = null;
@@ -179,7 +341,7 @@ public class ServerNetwork {
             }
 
             if (line.startsWith("PING:")) {
-                send("PONG:" + line.substring(5));
+                send("PONG:" + line.substring("PING:".length()));
                 return;
             }
             if (line.startsWith("RESUME:")) {
@@ -338,7 +500,17 @@ public class ServerNetwork {
             send("RESUMED:" + room.getRoomId());
         }
 
+        private boolean isVoiceRoomMember(String roomId) {
+            ServerSession activeSession = session;
+            ServerGame room = currentRoom;
+            return !socket.isClosed() && activeSession != null
+                    && activeSession.getClientHandler() == this
+                    && room != null && room.getRoomId().equals(roomId)
+                    && roomId.equals(activeSession.getRoomId());
+        }
+
         private void leaveCurrentRoomIfAny() {
+            removeVoicePeer(this);
             ServerGame room = currentRoom;
             currentRoom = null;
             inLobby = true;

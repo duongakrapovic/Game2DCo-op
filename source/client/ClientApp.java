@@ -15,6 +15,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     private final ClientGame gamePanel;
 
     private ClientNetwork netClient;
+    private ClientVoiceChat voiceChat;
     private final ClientMovement movement;
 
     private final CardLayout cardLayout = new CardLayout();
@@ -57,6 +58,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             @Override
             public void windowClosing(WindowEvent e) {
                 gamePanel.stopOfflineMode();
+                stopVoiceChat();
                 if (netClient != null) netClient.close();
             }
         });
@@ -86,6 +88,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
         btnOffline.addActionListener(e -> {
             gamePanel.stopOfflineMode();
+            stopVoiceChat();
             if (netClient != null) netClient.close();
             setTitle("Dungeon Co-op [OFFLINE]");
             gamePanel.startOfflineMode(myName);
@@ -116,6 +119,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         topBar.setOpaque(false);
         JButton btnBack = new JButton("Quay lại Menu");
         btnBack.addActionListener(e -> {
+            stopVoiceChat();
             if (netClient != null) netClient.close();
             cardLayout.show(mainContainer, "MENU");
         });
@@ -179,6 +183,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
     private void connectToServer() {
         String ip = txtServerIp.getText().trim();
+        stopVoiceChat();
         if (netClient != null) netClient.close();
         netClient = new ClientNetwork(ip, Common.TCP_PORT, this);
         netClient.connect();
@@ -253,44 +258,18 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             @Override public void actionPerformed(ActionEvent e) {
                 if (JOptionPane.showConfirmDialog(ClientApp.this, "Về Menu chính?", "Thoát", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
                     gamePanel.stopOfflineMode();
+                    stopVoiceChat();
                     if (netClient != null) netClient.close();
                     cardLayout.show(mainContainer, "MENU");
                 }
             }
         });
 
-        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F3, 0), "f3");
-        gamePanel.getActionMap().put("f3", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) { gamePanel.toggleHud(); }
+        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_M, 0), "voice-mute");
+        gamePanel.getActionMap().put("voice-mute", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { toggleVoiceMute(); }
         });
 
-        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F4, 0), "f4");
-        gamePanel.getActionMap().put("f4", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) {
-                if (netClient != null) {
-                    int cur = netClient.getLagMs();
-                    int next = (cur == 0) ? 50 : (cur == 50) ? 100 : (cur == 100) ? 200 : 0;
-                    netClient.setLagMs(next);
-                }
-            }
-        });
-
-        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0), "f6");
-        gamePanel.getActionMap().put("f6", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) { movement.setPredictionEnabled(!movement.isPredictionEnabled()); }
-        });
-
-        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F7, 0), "f7");
-        gamePanel.getActionMap().put("f7", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) { movement.setInterpolationEnabled(!movement.isInterpolationEnabled()); }
-        });
-
-        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F9, 0), "f9");
-        gamePanel.getActionMap().put("f9", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) {
-                if (netClient != null) netClient.simulateConnectionDrop();
-            }
-        });
     }
 
     public void sendAttackInput(boolean pressed) {
@@ -325,21 +304,44 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             });
         } else if (line.startsWith(Common.CMD_STATE)) {
             gamePanel.updateOnlineWorld(line, myName);
-            updateHudDisplay();
+        } else if (line.startsWith(Common.CMD_JOINED + ":")) {
+            SwingUtilities.invokeLater(this::startVoiceChat);
+        } else if (line.startsWith("RESUMED:")) {
+            SwingUtilities.invokeLater(this::startVoiceChat);
+        } else if ("LEFT".equals(line)) {
+            SwingUtilities.invokeLater(this::stopVoiceChat);
         } else if (line.startsWith(Common.CMD_ERROR)) {
             SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, line.split(":")[1]));
         }
     }
 
-    private void updateHudDisplay() {
-        if (netClient == null) return;
-        String l1 = String.format("PING %.0f ms (jitter %.1f)   STATE 60/s   down 4.1 KB/s   up 2.0 KB/s",
-                netClient.getRttMs(), netClient.getJitterMs());
-        String l2 = String.format("Dự đoán [F6]: %s   Nội suy [F7]: %s (%d ms)   Lag giả lập [F4]: %d ms",
-                movement.isPredictionEnabled() ? "BẬT" : "TẮT", movement.isInterpolationEnabled() ? "BẬT" : "TẮT", movement.getInterpolationDelayMs(), netClient.getLagMs());
-        String l3 = String.format("Sai số reconcile: %.2f px   Pending: %d   Hiệu chỉnh: %d   Reconnect: %d",
-                movement.maxError(), movement.pendingCount(), movement.correctionCount(), netClient.getReconnectCount());
-        gamePanel.setHudInfo(l1, l2, l3);
+    private void startVoiceChat() {
+        if (netClient == null || netClient.getSessionToken() == null) return;
+        if (voiceChat != null) {
+            voiceChat.registerNow();
+            return;
+        }
+
+        try {
+            voiceChat = new ClientVoiceChat(txtServerIp.getText().trim(), Common.TCP_PORT,
+                    netClient.getSessionToken(),
+                    status -> SwingUtilities.invokeLater(() -> gamePanel.setVoiceStatus(status)));
+        } catch (java.io.IOException e) {
+            gamePanel.setVoiceStatus("VOICE: Could not start (" + e.getMessage() + ")");
+        }
+    }
+
+    private void toggleVoiceMute() {
+        if (voiceChat != null) {
+            voiceChat.toggleMuted();
+        }
+    }
+
+    private void stopVoiceChat() {
+        ClientVoiceChat current = voiceChat;
+        voiceChat = null;
+        if (current != null) current.close();
+        gamePanel.setVoiceStatus("");
     }
 
     @Override
@@ -353,6 +355,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
     @Override
     public void onSessionLost(String reason) {
+        SwingUtilities.invokeLater(this::stopVoiceChat);
         SwingUtilities.invokeLater(() -> cardLayout.show(mainContainer, "MENU"));
     }
 

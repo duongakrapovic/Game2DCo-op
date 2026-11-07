@@ -42,7 +42,7 @@ public class ServerApp {
             running = true;
             serverNetwork = new ServerNetwork(Common.TCP_PORT, this);
             serverNetwork.start();
-            System.out.println("[ServerApp] TCP Server da mo tai Port: " + Common.TCP_PORT);
+            System.out.println("[ServerApp] TCP va UDP da mo tai Port: " + Common.TCP_PORT);
             System.out.println("[ServerApp] Server da san sang phuc vu! (Go 'exit' de dung)");
 
             BufferedReader console = new BufferedReader(new InputStreamReader(System.in));
