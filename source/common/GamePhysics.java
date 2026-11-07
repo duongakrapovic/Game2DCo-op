@@ -114,7 +114,10 @@ public class GamePhysics {
 
         if (m.pathIndex >= m.currentPath.length) {
             // A player can be just outside attack range while sharing the same tile.
-            if (startTileX == goalTileX && distance > MONSTER_ATTACK_RANGE) {
+            // Only close the remaining distance when the monster has a clear line;
+            // otherwise it keeps pushing into a blocking tile forever.
+            if (startTileX == goalTileX && distance > MONSTER_ATTACK_RANGE
+                    && hasLineOfSight(m.x, m.y, target.x, target.y, map)) {
                 moveMonsterToward(m, dx, dy, dt, map);
             }
             return;

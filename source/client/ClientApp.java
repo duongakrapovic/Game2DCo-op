@@ -60,6 +60,11 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
                 gamePanel.stopOfflineMode();
                 if (netClient != null) netClient.close();
             }
+
+            @Override
+            public void windowLostFocus(WindowEvent e) {
+                resetInputState();
+            }
         });
     }
 
@@ -117,6 +122,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         topBar.setOpaque(false);
         JButton btnBack = new JButton("Quay lại Menu");
         btnBack.addActionListener(e -> {
+            resetInputState();
             if (netClient != null) netClient.close();
             cardLayout.show(mainContainer, "MENU");
         });
@@ -229,6 +235,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     }
 
     private void switchToGameScene() {
+        resetInputState();
         cardLayout.show(mainContainer, "GAME");
         SwingUtilities.invokeLater(() -> {
             gamePanel.setFocusable(true);
@@ -274,6 +281,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         gamePanel.getActionMap().put("esc", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) {
                 if (JOptionPane.showConfirmDialog(ClientApp.this, "Về Menu chính?", "Thoát", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
+                    resetInputState();
                     gamePanel.stopOfflineMode();
                     if (netClient != null) netClient.close();
                     cardLayout.show(mainContainer, "MENU");
@@ -321,6 +329,14 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             ClientMovement.PredictionInput input = movement.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down, pressed);
             netClient.send("INPUT:" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.seq + ":" + input.attack);
         }
+    }
+
+    private void resetInputState() {
+        gamePanel.left = false;
+        gamePanel.right = false;
+        gamePanel.up = false;
+        gamePanel.down = false;
+        sendAttackInput(false);
     }
 
     private void updateKey(String dir, boolean pressed) {
@@ -379,7 +395,10 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     @Override
     public void onSessionLost(String reason) {
         pendingRoomCommand = null;
-        SwingUtilities.invokeLater(() -> cardLayout.show(mainContainer, "MENU"));
+        SwingUtilities.invokeLater(() -> {
+            resetInputState();
+            cardLayout.show(mainContainer, "MENU");
+        });
     }
 
     public static void main(String[] args) {

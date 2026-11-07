@@ -36,7 +36,7 @@ public class ClientGame extends JPanel {
     private final Random rand = new Random();
     private boolean previousLocalAttack;
 
-    public boolean left = false, right = false, up = false, down = false, attack = false;
+    public volatile boolean left = false, right = false, up = false, down = false, attack = false;
     private ClientApp clientAppRef = null;
 
     private boolean showHud = true;
