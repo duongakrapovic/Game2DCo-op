@@ -38,11 +38,8 @@ public class ClientGame extends JPanel {
     public boolean left = false, right = false, up = false, down = false, attack = false;
     private ClientApp clientAppRef = null;
 
-    private boolean showHud = true;
-    private String hudLine1 = "";
-    private String hudLine2 = "";
-    private String hudLine3 = "";
     private String bannerMessage = null;
+    private String voiceStatus = "";
 
     public ClientGame(GameMap mapManager, ClientMovement movement) {
         this.mapManager = mapManager;
@@ -223,9 +220,18 @@ public class ClientGame extends JPanel {
 
         renderPlayers.clear();
         for (GameData.PlayerState p : snapshot.players) {
+            movement.addSnap(p.id, p.x, p.y, p.direction, p.spriteNum);
             renderPlayers.put(p.id, p);
             if (p.name.equals(myName)) {
                 movement.onServerState(p.x, p.y, p.lastAckSeq);
+            } else {
+                ClientMovement.Snap interpolated = movement.getInterpolatedState(p.id);
+                if (interpolated != null) {
+                    p.x = interpolated.x;
+                    p.y = interpolated.y;
+                    p.direction = interpolated.direction;
+                    p.spriteNum = interpolated.spriteNum;
+                }
             }
         }
 
@@ -237,10 +243,10 @@ public class ClientGame extends JPanel {
         repaint();
     }
 
-    public void setHudInfo(String l1, String l2, String l3) {
-        this.hudLine1 = l1; this.hudLine2 = l2; this.hudLine3 = l3;
+    public void setVoiceStatus(String status) {
+        voiceStatus = status == null ? "" : status;
+        repaint();
     }
-    public void toggleHud() { this.showHud = !this.showHud; }
     public void setBannerMessage(String msg) { this.bannerMessage = msg; }
 
     @Override
@@ -358,14 +364,14 @@ public class ClientGame extends JPanel {
             g2.fillRect(screenX, screenY - 5, (int)(entitySize * ((float)p.hp / p.maxHp)), 4);
         }
 
-        if (showHud && !hudLine1.isEmpty()) {
-            g2.setColor(new Color(0, 40, 0, 200));
-            g2.fillRect(10, 10, getWidth() - 20, 65);
-            g2.setColor(Color.GREEN);
-            g2.setFont(new Font("Monospaced", Font.BOLD, 13));
-            g2.drawString(hudLine1, 20, 28);
-            g2.drawString(hudLine2, 20, 46);
-            g2.drawString(hudLine3, 20, 64);
+        if (!voiceStatus.isEmpty()) {
+            g2.setColor(new Color(0, 0, 0, 170));
+            g2.fillRoundRect(10, 10, 500, 28, 8, 8);
+            Color statusColor = voiceStatus.contains("unavailable") ? Color.ORANGE
+                    : voiceStatus.contains("Muted") ? Color.YELLOW : Color.GREEN;
+            g2.setColor(statusColor);
+            g2.setFont(new Font("Arial", Font.BOLD, 13));
+            g2.drawString(voiceStatus, 18, 29);
         }
 
         if (bannerMessage != null) {
