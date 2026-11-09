@@ -44,6 +44,7 @@ public class ClientGame extends JPanel {
     private String hudLine2 = "";
     private String hudLine3 = "";
     private String bannerMessage = null;
+    private String voiceStatus = "";
 
     public ClientGame(GameMap mapManager, ClientMovement movement) {
         this.mapManager = mapManager;
@@ -166,7 +167,6 @@ public class ClientGame extends JPanel {
                 localPlayer.up = up;
                 localPlayer.down = down;
 
-                // XỬ LÝ HOẠT ẢNH CHÉM: Tách riêng nhịp chém (tổng 36 ticks)
                 long wallNow = System.currentTimeMillis();
                 if (attack && !previousLocalAttack && !localPlayer.isAttacking) {
                     localPlayer.isAttacking = true;
@@ -265,11 +265,22 @@ public class ClientGame extends JPanel {
         repaint();
     }
 
+    public void setVoiceStatus(String status) {
+        this.voiceStatus = status == null ? "" : status;
+        repaint();
+    }
+
     public void setHudInfo(String l1, String l2, String l3) {
         this.hudLine1 = l1; this.hudLine2 = l2; this.hudLine3 = l3;
     }
-    public void toggleHud() { this.showHud = !this.showHud; }
-    public void setBannerMessage(String msg) { this.bannerMessage = msg; }
+
+    public void toggleHud() {
+        this.showHud = !this.showHud;
+    }
+
+    public void setBannerMessage(String msg) {
+        this.bannerMessage = msg;
+    }
 
     @Override
     protected void paintComponent(Graphics g) {
@@ -283,14 +294,12 @@ public class ClientGame extends JPanel {
         int myHp = 100;
         int myMaxHp = 100;
 
-        boolean foundMe = false;
         for (GameData.PlayerState p : playersSnapshot.values()) {
             if (p.name.equals(myName)) {
                 myX = (int) p.x;
                 myY = (int) p.y;
                 myHp = p.hp;
                 myMaxHp = p.maxHp;
-                foundMe = true;
                 break;
             }
         }
@@ -345,7 +354,6 @@ public class ClientGame extends JPanel {
             if (p.isAttacking) {
                 Image[] axeFrames = axeSpriteMap.get(p.direction);
                 if (axeFrames != null && axeFrames.length > 0) {
-                    // 8 tick đầu giơ rìu lên (ảnh 1), 16 tick sau giáng rìu xuống (ảnh 2)
                     int axeIdx = (p.attackTicks <= 8) ? 0 : 1;
                     currentSprite = axeFrames[axeIdx];
                 }
@@ -364,7 +372,6 @@ public class ClientGame extends JPanel {
                     int drawX = screenX;
                     int drawY = screenY;
 
-                    // Căn chuẩn tỉ lệ cho ảnh 16x32 (dọc) và 32x16 (ngang)
                     switch (p.direction) {
                         case "up":
                             renderH = entitySize * 2;
@@ -405,6 +412,7 @@ public class ClientGame extends JPanel {
             g2.fillRect(screenX, screenY - 5, (int)(entitySize * ((float)p.hp / p.maxHp)), 4);
         }
 
+        // 3. Hiển thị HUD cá nhân & Máu người chơi
         int safeMaxHp = Math.max(1, myMaxHp);
         g2.setColor(new Color(15, 18, 26, 210));
         g2.fillRoundRect(16, 16, 240, 60, 12, 12);
@@ -420,6 +428,7 @@ public class ClientGame extends JPanel {
         g2.setColor(myHp > safeMaxHp * 0.3f ? new Color(225, 55, 55) : new Color(255, 120, 0));
         g2.fillRoundRect(28, 44, currentBarW, 14, 8, 8);
 
+        // 4. Hiển thị HUD Mạng (F3)
         if (showHud && !hudLine1.isEmpty()) {
             int hudX = 270;
             int hudWidth = Math.max(0, getWidth() - hudX - 10);
@@ -430,6 +439,17 @@ public class ClientGame extends JPanel {
             g2.drawString(hudLine1, hudX + 10, 28);
             g2.drawString(hudLine2, hudX + 10, 46);
             g2.drawString(hudLine3, hudX + 10, 64);
+        }
+
+        // 5. Hiển thị trạng thái Voice Chat
+        if (!voiceStatus.isEmpty()) {
+            g2.setColor(new Color(0, 0, 0, 170));
+            g2.fillRoundRect(16, 86, 320, 28, 8, 8);
+            Color statusColor = voiceStatus.contains("unavailable") ? Color.ORANGE
+                    : voiceStatus.contains("Muted") ? Color.YELLOW : Color.GREEN;
+            g2.setColor(statusColor);
+            g2.setFont(new Font("Arial", Font.BOLD, 12));
+            g2.drawString(voiceStatus, 24, 104);
         }
 
         if (bannerMessage != null) {

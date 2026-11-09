@@ -140,7 +140,9 @@ public class ClientNetwork {
     public int getLagMs() { return simulatedLagMs; }
     public double getRttMs() { return rttMs; }
     public double getJitterMs() { return jitterMs; }
+
     public String getMyId() { return myId; }
+    public String getSessionToken() { return sessionToken; }
     public State getState() { return state; }
     public long getReconnectCount() { return reconnectCount; }
 
