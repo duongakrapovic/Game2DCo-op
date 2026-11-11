@@ -9,7 +9,7 @@
 | STT | Họ và Tên | MSSV | Email | Đóng góp |
 |-----|-----------|------|-------|----------|
 | 1 | Trần Văn Đức | B23DCCN191 | b23dccn191@ptit.edu.vn | *(xem commit history)* |
-| 2 | Nguyễn Minh Hiền | B23DCCN289 | b23dccn289@ptit.edu.vn | *(xem commit history)* |
+| 2 | Nguyễn Minh Hiển | B23DCCN289 | b23dccn289@ptit.edu.vn | *(xem commit history)* |
 | 3 | Vũ Hải Dương | B23DCCN233 | b23dccn233@ptit.edu.vn | *(xem commit history)* |
 
 **Tên nhóm:** Nhóm 6 – Lập trình mạng  
