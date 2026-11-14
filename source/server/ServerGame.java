@@ -218,6 +218,9 @@ public class ServerGame implements Runnable {
             if (monster.isDead) {
                 if (--monster.respawnTimer <= 0) {
                     Point spawn = findRandomMapPoint();
+                    if (spawn == null) {
+                        spawn = new Point((int) Common.SPAWN_X, (int) Common.SPAWN_Y);
+                    }
                     monster.x = spawn.x;
                     monster.y = spawn.y;
                     monster.hp = monster.maxHp;
