@@ -79,6 +79,23 @@ public class GameData {
         }
     }
 
+    public static class ItemState {
+        public String id;
+        public String type = "HEAL";
+        public float x;
+        public float y;
+        public int healAmount = 30;
+        public boolean collected = false;
+        public int respawnTimer = 0;
+
+        public ItemState(String id, String type, float x, float y) {
+            this.id = id;
+            this.type = type;
+            this.x = x;
+            this.y = y;
+        }
+    }
+
     /*
      * To add another monster kind (for example SOLDIER, SKELETON, or BOSS),
      * keep its per-instance state here and initialize it in the constructor or
@@ -109,6 +126,7 @@ public class GameData {
         public long timestamp;
         public List<PlayerState> players = new ArrayList<>();
         public List<MonsterState> monsters = new ArrayList<>();
+        public List<ItemState> items = new ArrayList<>();
 
         public WorldSnapshot() {
             this.timestamp = System.currentTimeMillis();

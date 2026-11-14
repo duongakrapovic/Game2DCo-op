@@ -22,9 +22,11 @@ public class ClientGame extends JPanel {
     private final Map<String, Image[]> spriteMap = new HashMap<>();
     private final Map<String, Image[]> axeSpriteMap = new HashMap<>();
     private final Image[] slimeSprites = new Image[2];
+    private Image potionImage;
 
     private volatile Map<String, GameData.PlayerState> renderPlayers = new ConcurrentHashMap<>();
     private volatile Map<String, GameData.MonsterState> renderMonsters = new ConcurrentHashMap<>();
+    private volatile Map<String, GameData.ItemState> renderItems = new ConcurrentHashMap<>();
 
     private final GameMap mapManager;
     private final ClientMovement movement;
@@ -121,6 +123,11 @@ public class ClientGame extends JPanel {
             slimeSprites[0] = ImageIO.read(new File(mPath + "greenslime_down_1.png"));
             slimeSprites[1] = ImageIO.read(new File(mPath + "greenslime_down_2.png"));
 
+            File potionFile = new File("source/content/object/healthposion.png");
+            if (potionFile.exists()) {
+                potionImage = ImageIO.read(potionFile);
+            }
+
         } catch (Exception e) {
             System.err.println("[ClientGame] Lỗi nạp hình ảnh: " + e.getMessage());
         }
@@ -155,6 +162,12 @@ public class ClientGame extends JPanel {
         previousLocalAttack = false;
         renderPlayers = new ConcurrentHashMap<>();
         renderMonsters = new ConcurrentHashMap<>();
+        renderItems = new ConcurrentHashMap<>();
+
+        for (int i = 1; i <= 8; i++) {
+            Point pt = getRandomMapPoint();
+            renderItems.put("POTION_" + i, new GameData.ItemState("POTION_" + i, "potion", pt.x, pt.y));
+        }
 
         for (int i = 1; i <= 15; i++) {
             Point pt;
@@ -202,6 +215,10 @@ public class ClientGame extends JPanel {
                                 m.respawnTimer = 180;
                                 m.currentPath = new int[0][2];
                                 m.pathIndex = 0;
+                                if (rand.nextBoolean()) {
+                                    String dropId = "DROP_" + System.currentTimeMillis() + "_" + m.id;
+                                    renderItems.put(dropId, new GameData.ItemState(dropId, "potion", m.x, m.y));
+                                }
                             }
                         }
                     }
@@ -209,6 +226,31 @@ public class ClientGame extends JPanel {
                 previousLocalAttack = attack;
 
                 GamePhysics.updatePlayer(localPlayer, mapManager, dt);
+
+                Rectangle playerBox = GamePhysics.getEntityBounds(localPlayer.x, localPlayer.y);
+                Rectangle itemBox = new Rectangle(0, 0, GamePhysics.ENTITY_SIZE, GamePhysics.ENTITY_SIZE);
+                for (GameData.ItemState item : renderItems.values()) {
+                    if (item.collected) {
+                        if (item.respawnTimer > 0) {
+                            if (--item.respawnTimer <= 0) {
+                                Point spawn = getRandomMapPoint();
+                                item.x = spawn.x;
+                                item.y = spawn.y;
+                                item.collected = false;
+                            }
+                        }
+                        continue;
+                    }
+
+                    itemBox.setBounds((int) item.x, (int) item.y, GamePhysics.ENTITY_SIZE, GamePhysics.ENTITY_SIZE);
+                    if (localPlayer.hp > 0 && localPlayer.hp < localPlayer.maxHp && playerBox.intersects(itemBox)) {
+                        localPlayer.hp = Math.min(localPlayer.maxHp, localPlayer.hp + item.healAmount);
+                        item.collected = true;
+                        if (item.id.startsWith("POTION_")) {
+                            item.respawnTimer = 900;
+                        }
+                    }
+                }
 
                 for (GameData.MonsterState m : renderMonsters.values()) {
                     if (m.isDead) {
@@ -288,6 +330,12 @@ public class ClientGame extends JPanel {
         }
         renderMonsters = updatedMonsters;
 
+        Map<String, GameData.ItemState> updatedItems = new ConcurrentHashMap<>();
+        for (GameData.ItemState it : snapshot.items) {
+            updatedItems.put(it.id, it);
+        }
+        renderItems = updatedItems;
+
         repaint();
     }
 
@@ -341,6 +389,28 @@ public class ClientGame extends JPanel {
         if (totalMapHeight > getHeight()) camY = Math.max(0, Math.min(camY, totalMapHeight - getHeight()));
 
         int entitySize = GamePhysics.ENTITY_SIZE;
+
+        // 0. Vẽ Vật phẩm (Bình máu)
+        Map<String, GameData.ItemState> itemsSnapshot = renderItems;
+        for (GameData.ItemState item : itemsSnapshot.values()) {
+            if (item.collected) continue;
+            int screenX = (int) item.x - camX;
+            int screenY = (int) item.y - camY;
+
+            if (screenX + entitySize < 0 || screenX > getWidth()
+                    || screenY + entitySize < 0 || screenY > getHeight()) {
+                continue;
+            }
+
+            if (potionImage != null) {
+                g2.drawImage(potionImage, screenX, screenY, entitySize, entitySize, null);
+            } else {
+                g2.setColor(new Color(230, 40, 40));
+                g2.fillOval(screenX + 8, screenY + 8, entitySize - 16, entitySize - 16);
+                g2.setColor(Color.WHITE);
+                g2.drawString("+HP", screenX + 10, screenY + entitySize / 2 + 4);
+            }
+        }
 
         // 1. Vẽ Quái Slime
         for (GameData.MonsterState m : monstersSnapshot.values()) {

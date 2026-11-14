@@ -79,6 +79,16 @@ public class GameProtocol {
               .append(m.isDead ? "1" : "0").append(";");
         }
 
+        // Khối Vật phẩm (Bình máu)
+        sb.append("#ITEMS:");
+        for (GameData.ItemState it : snapshot.items) {
+            sb.append(it.id).append(",")
+              .append(it.type).append(",")
+              .append(fmt2(it.x)).append(",")
+              .append(fmt2(it.y)).append(",")
+              .append(it.collected ? "1" : "0").append(";");
+        }
+
         return sb.toString();
     }
 
@@ -125,6 +135,18 @@ public class GameProtocol {
                         m.maxHp = Integer.parseInt(mData[7]);
                         m.isDead = "1".equals(mData[8]);
                         snapshot.monsters.add(m);
+                    }
+                }
+            } else if (sec.startsWith("ITEMS:")) {
+                String raw = sec.substring(6);
+                String[] items = raw.split(";");
+                for (String item : items) {
+                    if (item.trim().isEmpty()) continue;
+                    String[] iData = item.split(",");
+                    if (iData.length >= 5) {
+                        GameData.ItemState it = new GameData.ItemState(iData[0], iData[1], Float.parseFloat(iData[2]), Float.parseFloat(iData[3]));
+                        it.collected = "1".equals(iData[4]);
+                        snapshot.items.add(it);
                     }
                 }
             }
