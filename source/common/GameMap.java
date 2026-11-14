@@ -185,6 +185,79 @@ public class GameMap {
         return tileNum >= 0 && collisionTiles.contains(tileNum);
     }
 
+    private int[][] regionMap;
+    private int spawnRegion = -2;
+
+    private int mapWidthTiles() {
+        return Common.MAX_CHUNK_X * Common.CHUNK_SIZE;
+    }
+
+    private int mapHeightTiles() {
+        return Common.MAX_CHUNK_Y * Common.CHUNK_SIZE;
+    }
+
+    private boolean isTileStandable(int tileX, int tileY) {
+        if (tileX < 0 || tileY < 0 || tileX >= mapWidthTiles() || tileY >= mapHeightTiles()) return false;
+        int centerX = tileX * Common.TILE_SIZE + Common.TILE_SIZE / 2;
+        int centerY = tileY * Common.TILE_SIZE + Common.TILE_SIZE / 2;
+        return !isCollisionAtWorld(centerX, centerY);
+    }
+
+    private synchronized void ensureSpawnRegions() {
+        if (regionMap != null) return;
+        int w = mapWidthTiles();
+        int h = mapHeightTiles();
+        regionMap = new int[h][w];
+        for (int[] row : regionMap) Arrays.fill(row, -1);
+
+        int[] queueX = new int[w * h];
+        int[] queueY = new int[w * h];
+        int[] offsetX = {1, -1, 0, 0};
+        int[] offsetY = {0, 0, 1, -1};
+
+        int region = 0;
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                if (regionMap[y][x] != -1 || !isTileStandable(x, y)) continue;
+                int head = 0, tail = 0;
+                queueX[tail] = x;
+                queueY[tail] = y;
+                tail++;
+                regionMap[y][x] = region;
+                while (head < tail) {
+                    int cx = queueX[head];
+                    int cy = queueY[head];
+                    head++;
+                    for (int d = 0; d < 4; d++) {
+                        int nx = cx + offsetX[d];
+                        int ny = cy + offsetY[d];
+                        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                        if (regionMap[ny][nx] != -1 || !isTileStandable(nx, ny)) continue;
+                        regionMap[ny][nx] = region;
+                        queueX[tail] = nx;
+                        queueY[tail] = ny;
+                        tail++;
+                    }
+                }
+                region++;
+            }
+        }
+
+        int spawnTileX = Math.floorDiv((int) Common.SPAWN_X, Common.TILE_SIZE);
+        int spawnTileY = Math.floorDiv((int) Common.SPAWN_Y, Common.TILE_SIZE);
+        spawnRegion = (spawnTileX >= 0 && spawnTileY >= 0 && spawnTileX < w && spawnTileY < h)
+                ? regionMap[spawnTileY][spawnTileX] : -1;
+    }
+
+    public boolean isSpawnReachableAtWorld(int worldX, int worldY) {
+        ensureSpawnRegions();
+        if (spawnRegion < 0) return false;
+        int tileX = Math.floorDiv(worldX, Common.TILE_SIZE);
+        int tileY = Math.floorDiv(worldY, Common.TILE_SIZE);
+        if (tileX < 0 || tileY < 0 || tileX >= mapWidthTiles() || tileY >= mapHeightTiles()) return false;
+        return regionMap[tileY][tileX] == spawnRegion;
+    }
+
     public void draw(Graphics2D g2, int focusWorldX, int focusWorldY, int screenWidth, int screenHeight) {
         g2.setColor(Color.BLACK);
         g2.fillRect(0, 0, screenWidth, screenHeight);

@@ -245,6 +245,8 @@ public class ServerGame implements Runnable {
             int x = random.nextInt(maxX + 1);
             int y = random.nextInt(maxY + 1);
             if (!isWalkable(x, y)
+                    || !mapManager.isSpawnReachableAtWorld(
+                            x + GamePhysics.ENTITY_SIZE / 2, y + GamePhysics.ENTITY_SIZE / 2)
                     || Math.hypot(x - Common.SPAWN_X, y - Common.SPAWN_Y)
                             < GamePhysics.ENTITY_SIZE * 3) {
                 continue;

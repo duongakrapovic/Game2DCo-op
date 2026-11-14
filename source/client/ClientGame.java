@@ -145,7 +145,9 @@ public class ClientGame extends JPanel {
                     && !mapManager.isCollisionAtWorld(right, y + 3)
                     && !mapManager.isCollisionAtWorld(x + 3, bottom)
                     && !mapManager.isCollisionAtWorld(right, bottom);
-            if (walkable && Math.hypot(x - Common.SPAWN_X, y - Common.SPAWN_Y)
+            boolean onReachableLand = mapManager.isSpawnReachableAtWorld(
+                    x + GamePhysics.ENTITY_SIZE / 2, y + GamePhysics.ENTITY_SIZE / 2);
+            if (walkable && onReachableLand && Math.hypot(x - Common.SPAWN_X, y - Common.SPAWN_Y)
                     >= GamePhysics.ENTITY_SIZE * 3) {
                 return new Point(x, y);
             }
