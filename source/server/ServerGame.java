@@ -18,6 +18,8 @@ public class ServerGame implements Runnable {
     private static final int MONSTER_COUNT = 15;
     private static final int RESPAWN_MIN_TICKS = 180;
     private static final int RESPAWN_MAX_TICKS = 300;
+    private static final int MAX_ITEMS = 60;
+    private static final int DROP_DESPAWN_TICKS = 600;
 
     private final String roomId;
     private final Map<String, GameData.PlayerState> players = new ConcurrentHashMap<>();
@@ -45,12 +47,18 @@ public class ServerGame implements Runnable {
 
         for (int i = 1; i <= MONSTER_COUNT; i++) {
             Point spawn = findRandomMapPoint();
+            if (spawn == null) {
+                spawn = new Point((int) Common.SPAWN_X, (int) Common.SPAWN_Y);
+            }
             monsters.put("M" + i, new GameData.MonsterState("M" + i, spawn.x, spawn.y));
         }
 
         // Sinh 8 bình máu rải rác trên bản đồ khi tạo phòng
         for (int i = 1; i <= 8; i++) {
             Point spawn = findRandomMapPoint();
+            if (spawn == null) {
+                spawn = new Point((int) Common.SPAWN_X, (int) Common.SPAWN_Y);
+            }
             String id = "POTION_" + itemCounter.getAndIncrement();
             items.put(id, new GameData.ItemState(id, "HEAL", spawn.x, spawn.y));
         }
@@ -169,15 +177,20 @@ public class ServerGame implements Runnable {
         boolean queuedTrigger = Boolean.TRUE.equals(pendingAttackTriggers.remove(player.id));
         boolean shouldTrigger = (queuedTrigger || (pressed && !previouslyPressed)) && !player.isAttacking;
 
-        if (shouldTrigger) {
-            player.isAttacking = true;
-            player.attackTicks = 0;
-            long now = System.currentTimeMillis();
-            Rectangle attackHitbox = GamePhysics.getAttackHitbox(
-                    player.x, player.y, player.direction);
-            for (GameData.MonsterState monster : monsters.values()) {
-                if (!monster.isDead && attackHitbox.intersects(
-                        GamePhysics.getEntityBounds(monster.x, monster.y))) {
+            if (shouldTrigger) {
+                player.isAttacking = true;
+                player.attackTicks = 0;
+                long now = System.currentTimeMillis();
+                Rectangle attackHitbox = GamePhysics.getAttackHitbox(
+                        player.x, player.y, player.direction);
+                float atkCX = player.x + GamePhysics.ENTITY_SIZE / 2f;
+                float atkCY = player.y + GamePhysics.ENTITY_SIZE / 2f;
+                for (GameData.MonsterState monster : monsters.values()) {
+                    if (!monster.isDead && attackHitbox.intersects(
+                            GamePhysics.getEntityBounds(monster.x, monster.y))
+                            && GamePhysics.hasLineOfSight(atkCX, atkCY,
+                                    monster.x + GamePhysics.ENTITY_SIZE / 2f,
+                                    monster.y + GamePhysics.ENTITY_SIZE / 2f, mapManager)) {
                     monster.hp = Math.max(0, monster.hp - 15);
                     monster.flashUntil = now + 150;
                     GamePhysics.applyKnockback(monster, player.x, player.y, 16.0f, mapManager);
@@ -189,7 +202,9 @@ public class ServerGame implements Runnable {
                         // 50% tỉ lệ rơi bình máu khi hạ gục quái
                         if (random.nextBoolean()) {
                             String dropId = "DROP_" + itemCounter.getAndIncrement();
-                            items.put(dropId, new GameData.ItemState(dropId, "HEAL", monster.x, monster.y));
+                            GameData.ItemState drop = new GameData.ItemState(dropId, "HEAL", monster.x, monster.y);
+                            drop.respawnTimer = DROP_DESPAWN_TICKS;
+                            items.put(dropId, drop);
                         }
                     }
                 }
@@ -273,7 +288,7 @@ public class ServerGame implements Runnable {
                 return new Point(x, y);
             }
         }
-        throw new IllegalStateException("Khong tim duoc vi tri hop le de sinh Slime trong map.");
+        return null;
     }
 
     private boolean isWalkable(int x, int y) {
@@ -294,18 +309,32 @@ public class ServerGame implements Runnable {
         Rectangle pickupBox = new Rectangle(0, 0, GamePhysics.ENTITY_SIZE, GamePhysics.ENTITY_SIZE);
         for (GameData.ItemState item : items.values()) {
             if (item.collected) {
-                if (item.respawnTimer > 0) {
-                    if (--item.respawnTimer <= 0) {
-                        Point spawn = findRandomMapPoint();
-                        item.x = spawn.x;
-                        item.y = spawn.y;
-                        item.collected = false;
+                if (item.id.startsWith("POTION_")) {
+                    // Bình máu trên map tự respawn sau 15s (900 ticks)
+                    if (item.respawnTimer > 0) {
+                        if (--item.respawnTimer <= 0) {
+                            Point spawn = findRandomMapPoint();
+                            if (spawn != null) {
+                                item.x = spawn.x;
+                                item.y = spawn.y;
+                                item.collected = false;
+                            }
+                        }
+                    } else {
+                        items.remove(item.id);
                     }
                 } else {
-                    // Bình máu rơi từ quái sau khi nhặt xong thì xóa để tránh phình bộ nhớ và phình gói tin mạng
+                    // Bình máu rơi từ quái nhặt xong thì xóa luôn để tránh phình bộ nhớ / gói tin
                     items.remove(item.id);
                 }
                 continue;
+            }
+            // Item rơi từ quái có thời gian sống, tránh rơi lũy tr forever
+            if (item.id.startsWith("DROP_")) {
+                if (--item.respawnTimer <= 0) {
+                    items.remove(item.id);
+                    continue;
+                }
             }
 
             pickupBox.setBounds((int) item.x, (int) item.y, GamePhysics.ENTITY_SIZE, GamePhysics.ENTITY_SIZE);
@@ -315,7 +344,6 @@ public class ServerGame implements Runnable {
                     if (playerBox.intersects(pickupBox)) {
                         player.hp = Math.min(player.maxHp, player.hp + item.healAmount);
                         item.collected = true;
-                        // Bình máu rơi từ quái nhặt xong là biến mất, bình máu map tự respawn sau 15s (900 ticks)
                         if (item.id.startsWith("POTION_")) {
                             item.respawnTimer = 900;
                         }
@@ -323,6 +351,21 @@ public class ServerGame implements Runnable {
                     }
                 }
             }
+        }
+
+        // Giới hạn tổng số item để tránh phình bộ nhớ và phình gói tin snapshot
+        while (items.size() > MAX_ITEMS) {
+            String dropId = null;
+            for (GameData.ItemState it : items.values()) {
+                if (it.id.startsWith("DROP_")) {
+                    dropId = it.id;
+                    break;
+                }
+            }
+            if (dropId == null) {
+                break;
+            }
+            items.remove(dropId);
         }
     }
 

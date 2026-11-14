@@ -37,6 +37,8 @@ public class ClientGame extends JPanel {
     private Thread localGameThread;
     private volatile boolean isLocalRunning = false;
     private final Random rand = new Random();
+    private static final int MAX_ITEMS = 60;
+    private static final int DROP_DESPAWN_TICKS = 600;
     private boolean previousLocalAttack;
 
     public volatile boolean left = false, right = false, up = false, down = false, attack = false;
@@ -206,10 +208,15 @@ public class ClientGame extends JPanel {
                 if (attackReq && !localPlayer.isAttacking) {
                     localPlayer.isAttacking = true;
                     localPlayer.attackTicks = 0;
-                    Rectangle attackBox = GamePhysics.getAttackHitbox(
-                            localPlayer.x, localPlayer.y, localPlayer.direction);
-                    for (GameData.MonsterState m : renderMonsters.values()) {
-                        if (!m.isDead && attackBox.intersects(GamePhysics.getEntityBounds(m.x, m.y))) {
+                Rectangle attackBox = GamePhysics.getAttackHitbox(
+                        localPlayer.x, localPlayer.y, localPlayer.direction);
+                float atkCX = localPlayer.x + GamePhysics.ENTITY_SIZE / 2f;
+                float atkCY = localPlayer.y + GamePhysics.ENTITY_SIZE / 2f;
+                for (GameData.MonsterState m : renderMonsters.values()) {
+                    if (!m.isDead && attackBox.intersects(GamePhysics.getEntityBounds(m.x, m.y))
+                            && GamePhysics.hasLineOfSight(atkCX, atkCY,
+                                    m.x + GamePhysics.ENTITY_SIZE / 2f,
+                                    m.y + GamePhysics.ENTITY_SIZE / 2f, mapManager)) {
                             m.hp = Math.max(0, m.hp - 15);
                             m.flashUntil = wallNow + 150;
                             GamePhysics.applyKnockback(m, localPlayer.x, localPlayer.y, 16.0f, mapManager);
@@ -220,7 +227,9 @@ public class ClientGame extends JPanel {
                                 m.pathIndex = 0;
                                 if (rand.nextBoolean()) {
                                     String dropId = "DROP_" + System.currentTimeMillis() + "_" + m.id;
-                                    renderItems.put(dropId, new GameData.ItemState(dropId, "potion", m.x, m.y));
+                                    GameData.ItemState drop = new GameData.ItemState(dropId, "potion", m.x, m.y);
+                                    drop.respawnTimer = DROP_DESPAWN_TICKS;
+                                    renderItems.put(dropId, drop);
                                 }
                             }
                         }
@@ -234,17 +243,28 @@ public class ClientGame extends JPanel {
                 Rectangle itemBox = new Rectangle(0, 0, GamePhysics.ENTITY_SIZE, GamePhysics.ENTITY_SIZE);
                 for (GameData.ItemState item : renderItems.values()) {
                     if (item.collected) {
-                        if (item.respawnTimer > 0) {
-                            if (--item.respawnTimer <= 0) {
-                                Point spawn = getRandomMapPoint();
-                                item.x = spawn.x;
-                                item.y = spawn.y;
-                                item.collected = false;
+                        if (item.id.startsWith("POTION_")) {
+                            if (item.respawnTimer > 0) {
+                                if (--item.respawnTimer <= 0) {
+                                    Point spawn = getRandomMapPoint();
+                                    item.x = spawn.x;
+                                    item.y = spawn.y;
+                                    item.collected = false;
+                                }
+                            } else {
+                                renderItems.remove(item.id);
                             }
                         } else {
                             renderItems.remove(item.id);
                         }
                         continue;
+                    }
+                    // Item rơi từ quái có thời gian sống, tránh lũy tr forever
+                    if (item.id.startsWith("DROP_")) {
+                        if (--item.respawnTimer <= 0) {
+                            renderItems.remove(item.id);
+                            continue;
+                        }
                     }
 
                     itemBox.setBounds((int) item.x, (int) item.y, GamePhysics.ENTITY_SIZE, GamePhysics.ENTITY_SIZE);
@@ -255,6 +275,21 @@ public class ClientGame extends JPanel {
                             item.respawnTimer = 900;
                         }
                     }
+                }
+
+                // Giới hạn tổng số item để tránh phình bộ nhớ và gói tin snapshot
+                while (renderItems.size() > MAX_ITEMS) {
+                    String dropId = null;
+                    for (GameData.ItemState it : renderItems.values()) {
+                        if (it.id.startsWith("DROP_")) {
+                            dropId = it.id;
+                            break;
+                        }
+                    }
+                    if (dropId == null) {
+                        break;
+                    }
+                    renderItems.remove(dropId);
                 }
 
                 for (GameData.MonsterState m : renderMonsters.values()) {
