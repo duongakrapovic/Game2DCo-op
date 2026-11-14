@@ -153,6 +153,28 @@ endpoint bằng token phiên; server chỉ xác nhận client đang ở phòng v
 gói âm thanh đến những người chơi khác trong phòng đó. Dữ liệu giọng nói không
 đi qua giao thức dòng TCP.
 
+### Phân chia TCP / UDP
+
+| Dữ liệu | Giao thức | Lý do |
+|---|---|---|
+| Sảnh phòng, WELCOME + token, RESUME, lỗi | TCP | Phải chắc chắn tới và đúng thứ tự |
+| INPUT (client → server), 60 gói/giây | **UDP** (`GAM1`) | Gói mới thay gói cũ, mất một gói không sao |
+| STATE người chơi, 60 gói/giây | **UDP** (`GAM1`) | Như trên; TCP sẽ chặn các gói sau khi phải gửi lại |
+| STATE quái, 20 gói/giây | **UDP** (`GAM1`) | Quái chậm; client nội suy nên vẫn mượt |
+| Voice | UDP (`VCH1`) | Âm thanh trễ thì vô dụng |
+
+Gói game UDP (chi tiết trong `common/GameUdp.java`) dùng chung cổng `8888` và chung socket với voice,
+phân biệt bằng magic `GAM1`. Client gửi `REGISTER` kèm token, server trả `REGISTERED`, sau đó client gửi `INPUT`
+mỗi tick và server gửi `STATE` bằng UDP. Các cơ chế đi kèm:
+
+- **Dự phòng TCP:** UDP bị chặn thì client gửi INPUT qua TCP và server gửi STATE đầy đủ qua TCP (game vẫn chơi được).
+  Server tự chuyển về TCP nếu 3 giây không nhận input UDP, và chuyển lại UDP khi client gửi lại.
+- **Chống kẹt phím:** server tự nhả phím nếu 300 ms không nhận input UDP (mất gói "nhả phím").
+- **Gói sai thứ tự:** STATE có số tick, client bỏ gói cũ; INPUT có seq, server bỏ gói cũ hơn gói đã nhận.
+- **Bảo mật:** INPUT chỉ được nhận từ địa chỉ UDP đã đăng ký bằng token phiên.
+- **Dự đoán + nội suy khi vẽ:** nhân vật của mình chạy vật lý cục bộ mỗi tick rồi reconcile theo `lastAckSeq`;
+  người chơi khác và quái được nội suy giữa hai snapshot, vẽ chậm 100 ms (`ClientMovement`).
+
 ---
 
 ## 🌐 CƠ CHẾ MẠNG (ĐIỂM NỔI BẬT)

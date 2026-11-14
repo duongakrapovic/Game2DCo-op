@@ -25,6 +25,10 @@ public class ClientGame extends JPanel {
 
     private volatile Map<String, GameData.PlayerState> renderPlayers = new ConcurrentHashMap<>();
     private volatile Map<String, GameData.MonsterState> renderMonsters = new ConcurrentHashMap<>();
+    // Dữ liệu server mới nhất (chế độ online); khung hình được dựng từ đây bằng dự đoán + nội suy
+    private Map<String, GameData.PlayerState> latestPlayers = new HashMap<>();
+    private Map<String, GameData.MonsterState> latestMonsters = new HashMap<>();
+    private volatile String myPlayerId = null;
 
     private final GameMap mapManager;
     private final ClientMovement movement;
@@ -133,6 +137,7 @@ public class ClientGame extends JPanel {
     public void startOfflineMode(String playerName) {
         stopOfflineMode();
         this.myName = playerName;
+        this.myPlayerId = null;
 
         localPlayer = new GameData.PlayerState("LOCAL_1", myName);
         previousLocalAttack = false;
@@ -233,35 +238,132 @@ public class ClientGame extends JPanel {
         }
     }
 
-    public void updateOnlineWorld(String stateLine, String myCurrentName) {
+    /**
+     * Nhận một gói trạng thái từ server (UDP hoặc TCP). Gói UDP có thể chỉ chứa người chơi hoặc chỉ chứa quái.
+     * Dữ liệu được cất vào bộ đệm nội suy; việc vẽ do renderOnlineFrame() làm mỗi tick.
+     */
+    public synchronized void updateOnlineWorld(String stateLine, String myCurrentName) {
         this.myName = myCurrentName;
         GameData.WorldSnapshot snapshot = GameProtocol.parseSnapshot(stateLine);
         long now = System.currentTimeMillis();
-        Map<String, GameData.PlayerState> previousPlayers = renderPlayers;
-        Map<String, GameData.PlayerState> updatedPlayers = new ConcurrentHashMap<>();
 
-        for (GameData.PlayerState p : snapshot.players) {
-            GameData.PlayerState previous = previousPlayers.get(p.id);
-            if (previous != null) {
-                if (p.hp < previous.hp) p.flashUntil = now + 150;
-                p.attackTicks = previous.isAttacking ? previous.attackTicks + 1 : 0;
+        if (snapshot.hasPlayers) {
+            Map<String, GameData.PlayerState> updated = new HashMap<>();
+            for (GameData.PlayerState p : snapshot.players) {
+                GameData.PlayerState previous = latestPlayers.get(p.id);
+                if (previous != null) {
+                    if (p.hp < previous.hp) p.flashUntil = now + 150;
+                    else p.flashUntil = previous.flashUntil;
+                    p.attackTicks = previous.isAttacking ? previous.attackTicks + 1 : 0;
+                }
+                updated.put(p.id, p);
+                if (isMyId(p)) {
+                    movement.onServerState(p.x, p.y, p.lastAckSeq);
+                }
+                movement.addSnap(p.id, p.x, p.y, p.direction, p.spriteNum);
             }
-            updatedPlayers.put(p.id, p);
-            if (p.name.equals(myName)) {
-                movement.onServerState(p.x, p.y, p.lastAckSeq);
+            latestPlayers = updated;
+        }
+
+        if (snapshot.hasMonsters) {
+            Map<String, GameData.MonsterState> updated = new HashMap<>();
+            for (GameData.MonsterState m : snapshot.monsters) {
+                GameData.MonsterState previous = latestMonsters.get(m.id);
+                if (previous != null) {
+                    if (m.hp < previous.hp) m.flashUntil = now + 150;
+                    else m.flashUntil = previous.flashUntil;
+                }
+                updated.put(m.id, m);
+                movement.addSnap(m.id, m.x, m.y, m.direction, m.spriteNum);
             }
+            latestMonsters = updated;
         }
-        renderPlayers = updatedPlayers;
 
-        Map<String, GameData.MonsterState> previousMonsters = renderMonsters;
-        Map<String, GameData.MonsterState> updatedMonsters = new ConcurrentHashMap<>();
-        for (GameData.MonsterState m : snapshot.monsters) {
-            GameData.MonsterState previous = previousMonsters.get(m.id);
-            if (previous != null && m.hp < previous.hp) m.flashUntil = now + 150;
-            updatedMonsters.put(m.id, m);
+        if (snapshot.hasPlayers || snapshot.hasMonsters) {
+            java.util.Set<String> ids = new java.util.HashSet<>(latestPlayers.keySet());
+            ids.addAll(latestMonsters.keySet());
+            movement.retainSnaps(ids);
         }
-        renderMonsters = updatedMonsters;
+    }
 
+    private boolean isMyId(GameData.PlayerState p) {
+        return myPlayerId != null ? myPlayerId.equals(p.id) : p.name.equals(myName);
+    }
+
+    /** Id người chơi của mình trong phòng (đặt khi vào phòng; giữ nguyên qua kết nối lại). */
+    public void setMyPlayerId(String id) {
+        this.myPlayerId = id;
+    }
+
+    /** Xóa dữ liệu thế giới online (khi vào phòng mới / rời phòng). */
+    public synchronized void clearOnlineWorld() {
+        latestPlayers = new HashMap<>();
+        latestMonsters = new HashMap<>();
+        renderPlayers = new ConcurrentHashMap<>();
+        renderMonsters = new ConcurrentHashMap<>();
+        movement.reset();
+        repaint();
+    }
+
+    /**
+     * Dựng khung hình online (gọi mỗi tick 60 lần/giây):
+     *  - nhân vật của mình: vị trí DỰ ĐOÁN cục bộ (phản hồi tức thì, đã được reconcile với server);
+     *  - người chơi khác và quái: vị trí NỘI SUY giữa hai snapshot, vẽ chậm 100 ms cho mượt.
+     * Máu, đang đánh, nhấp nháy lấy từ snapshot mới nhất của server.
+     */
+    public synchronized void renderOnlineFrame() {
+        Map<String, GameData.PlayerState> players = new ConcurrentHashMap<>();
+        for (GameData.PlayerState src : latestPlayers.values()) {
+            GameData.PlayerState p = new GameData.PlayerState(src.id, src.name);
+            p.hp = src.hp;
+            p.maxHp = src.maxHp;
+            p.isAttacking = src.isAttacking;
+            p.attackTicks = src.attackTicks;
+            p.flashUntil = src.flashUntil;
+            p.x = src.x;
+            p.y = src.y;
+            p.direction = src.direction;
+            p.spriteNum = src.spriteNum;
+
+            if (isMyId(src) && movement.isPredictionEnabled()) {
+                p.x = movement.x();
+                p.y = movement.y();
+                p.direction = movement.direction();
+                p.spriteNum = movement.spriteNum();
+            } else {
+                ClientMovement.Snap s = movement.getInterpolatedState(src.id);
+                if (s != null) {
+                    p.x = s.x;
+                    p.y = s.y;
+                    p.direction = s.direction;
+                    p.spriteNum = s.spriteNum;
+                }
+            }
+            players.put(p.id, p);
+        }
+
+        Map<String, GameData.MonsterState> monsters = new ConcurrentHashMap<>();
+        for (GameData.MonsterState src : latestMonsters.values()) {
+            GameData.MonsterState m = new GameData.MonsterState(src.id, src.x, src.y);
+            m.type = src.type;
+            m.hp = src.hp;
+            m.maxHp = src.maxHp;
+            m.isDead = src.isDead;
+            m.flashUntil = src.flashUntil;
+            m.direction = src.direction;
+            m.spriteNum = src.spriteNum;
+            ClientMovement.Snap s = movement.getInterpolatedState(src.id);
+            if (s != null) {
+                m.x = s.x;
+                m.y = s.y;
+                m.direction = s.direction;
+                m.spriteNum = s.spriteNum;
+            }
+            monsters.put(m.id, m);
+        }
+
+        renderPlayers = players;
+        renderMonsters = monsters;
         repaint();
     }
 
@@ -295,7 +397,7 @@ public class ClientGame extends JPanel {
         int myMaxHp = 100;
 
         for (GameData.PlayerState p : playersSnapshot.values()) {
-            if (p.name.equals(myName)) {
+            if (isMyId(p)) {
                 myX = (int) p.x;
                 myY = (int) p.y;
                 myHp = p.hp;
@@ -393,7 +495,7 @@ public class ClientGame extends JPanel {
                     g2.drawImage(currentSprite, screenX, screenY, entitySize, entitySize, null);
                 }
             } else {
-                g2.setColor(p.name.equals(myName) ? Color.CYAN : Color.BLUE);
+                g2.setColor(isMyId(p) ? Color.CYAN : Color.BLUE);
                 g2.fillRect(screenX, screenY, entitySize, entitySize);
             }
 

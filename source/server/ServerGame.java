@@ -5,6 +5,7 @@ import source.common.GameData;
 import source.common.GameMap;
 import source.common.GamePhysics;
 import source.common.GameProtocol;
+import source.common.GameUdp;
 
 import java.awt.Point;
 import java.awt.Rectangle;
@@ -25,6 +26,9 @@ public class ServerGame implements Runnable {
     private final Map<String, Integer> lastAcks = new ConcurrentHashMap<>();
     private final Map<String, Boolean> attackInputs = new ConcurrentHashMap<>();
     private final Map<String, Boolean> previousAttackInputs = new ConcurrentHashMap<>();
+
+    private final Map<String, Long> udpInputAt = new ConcurrentHashMap<>(); // lần cuối nhận input qua UDP
+    private int tick = 0;
 
     private final GameMap mapManager;
     private final Random random = new Random();
@@ -95,6 +99,38 @@ public class ServerGame implements Runnable {
         lastAcks.remove(playerId);
         attackInputs.remove(playerId);
         previousAttackInputs.remove(playerId);
+        udpInputAt.remove(playerId);
+    }
+
+    /** Input từ UDP: có thể đến trễ / sai thứ tự nên gói cũ hơn gói đã nhận bị bỏ. */
+    public void applyInput(String playerId, boolean left, boolean right, boolean up, boolean down,
+                           boolean attack, int seq, boolean viaUdp) {
+        GameData.PlayerState player = players.get(playerId);
+        if (player == null) return;
+        Integer previous = lastAcks.get(playerId);
+        if (previous != null && previous != -1 && GameUdp.newer(previous, seq)) return; // gói cũ
+
+        player.left = left;
+        player.right = right;
+        player.up = up;
+        player.down = down;
+        lastAcks.put(playerId, seq);
+        attackInputs.put(playerId, attack);
+        if (viaUdp) udpInputAt.put(playerId, System.currentTimeMillis());
+    }
+
+    /** Input từ TCP (dự phòng khi UDP bị chặn): tin cậy và đúng thứ tự nên áp dụng thẳng. */
+    public void applyTcpInput(String playerId, boolean left, boolean right, boolean up, boolean down,
+                              Boolean attack, Integer seq) {
+        GameData.PlayerState player = players.get(playerId);
+        if (player == null) return;
+        player.left = left;
+        player.right = right;
+        player.up = up;
+        player.down = down;
+        udpInputAt.remove(playerId);   // đang dùng TCP: không áp dụng bộ canh giờ input UDP
+        if (seq != null) updateAck(playerId, seq);
+        if (attack != null) updateAttackInput(playerId, attack);
     }
 
     public void updateAck(String playerId, int sequence) {
@@ -119,6 +155,7 @@ public class ServerGame implements Runnable {
     public void run() {
         long nextTick = System.nanoTime();
         while (running) {
+            releaseStaleUdpInputs();
             for (GameData.PlayerState player : players.values()) {
                 updatePlayerAttack(player);
                 GamePhysics.updatePlayer(player, mapManager);
@@ -128,7 +165,7 @@ public class ServerGame implements Runnable {
             }
 
             updateMonsters();
-            broadcastTcpState();
+            broadcastState();
 
             nextTick += Common.TICK_NS;
             long sleepNs = nextTick - System.nanoTime();
@@ -143,6 +180,24 @@ public class ServerGame implements Runnable {
             } else {
                 nextTick = System.nanoTime();
             }
+        }
+    }
+
+    /** UDP có thể mất gói "nhả phím": không nhận input quá INPUT_TIMEOUT_MS thì ngừng di chuyển người chơi. */
+    private void releaseStaleUdpInputs() {
+        if (udpInputAt.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, Long> e : udpInputAt.entrySet()) {
+            if (now - e.getValue() <= GameUdp.INPUT_TIMEOUT_MS) continue;
+            GameData.PlayerState player = players.get(e.getKey());
+            if (player != null) {
+                player.left = false;
+                player.right = false;
+                player.up = false;
+                player.down = false;
+            }
+            attackInputs.put(e.getKey(), false);
+            udpInputAt.remove(e.getKey(), e.getValue());
         }
     }
 
@@ -263,7 +318,11 @@ public class ServerGame implements Runnable {
                 + random.nextInt(RESPAWN_MAX_TICKS - RESPAWN_MIN_TICKS + 1);
     }
 
-    private void broadcastTcpState() {
+    /**
+     * Gửi trạng thái thế giới. Người chơi gửi mỗi tick (60 lần/giây), quái mỗi MONSTER_EVERY_TICKS tick.
+     * Client có UDP thì nhận bằng UDP; ai chưa có UDP (hoặc gói quá lớn) nhận chuỗi STATE đầy đủ qua TCP.
+     */
+    private void broadcastState() {
         if (players.isEmpty()) {
             return;
         }
@@ -275,9 +334,21 @@ public class ServerGame implements Runnable {
         }
         snapshot.monsters.addAll(monsters.values());
 
-        String stateMessage = GameProtocol.serializeSnapshot(snapshot);
+        tick++;
+        boolean sendMonsters = tick % GameUdp.MONSTER_EVERY_TICKS == 0;
+        byte[] playersPacket = GameUdp.state(GameUdp.STATE_PLAYERS, tick,
+                GameProtocol.serializeSnapshot(snapshot, true, false));
+        String monstersText = sendMonsters ? GameProtocol.serializeSnapshot(snapshot, false, true) : null;
+        byte[] monstersPacket = sendMonsters ? GameUdp.state(GameUdp.STATE_MONSTERS, tick, monstersText) : null;
+        String fullState = null;
+
         for (ServerNetwork.ClientHandler handler : clientHandlers.values()) {
-            handler.send(stateMessage);
+            if (!handler.trySendUdp(playersPacket)) {
+                if (fullState == null) fullState = GameProtocol.serializeSnapshot(snapshot);
+                handler.send(fullState);   // dự phòng TCP (đã gồm cả quái)
+            } else if (sendMonsters && !handler.trySendUdp(monstersPacket)) {
+                handler.send(monstersText);
+            }
         }
     }
 }

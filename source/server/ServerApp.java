@@ -177,6 +177,8 @@ public class ServerApp {
 
     private void removeSession(ServerSession session) {
         sessionsByToken.entrySet().removeIf(entry -> entry.getValue() == session);
+        ServerNetwork network = serverNetwork;
+        if (network != null) network.forgetGameUdp(session);
         ScheduledFuture<?> expiration = sessionExpirations.remove(session.getToken());
         if (expiration != null) {
             expiration.cancel(false);
