@@ -22,21 +22,25 @@ public class ClientGame extends JPanel {
     private final Map<String, Image[]> spriteMap = new HashMap<>();
     private final Map<String, Image[]> axeSpriteMap = new HashMap<>();
     private final Image[] slimeSprites = new Image[2];
+    private Image potionImage;
 
     private volatile Map<String, GameData.PlayerState> renderPlayers = new ConcurrentHashMap<>();
     private volatile Map<String, GameData.MonsterState> renderMonsters = new ConcurrentHashMap<>();
+    private volatile Map<String, GameData.ItemState> renderItems = new ConcurrentHashMap<>();
 
     private final GameMap mapManager;
     private final ClientMovement movement;
 
     private GameData.PlayerState localPlayer;
     private String myName = "Player";
+    private String myId = "";
     private Thread localGameThread;
     private volatile boolean isLocalRunning = false;
     private final Random rand = new Random();
     private boolean previousLocalAttack;
 
-    public boolean left = false, right = false, up = false, down = false, attack = false;
+    public volatile boolean left = false, right = false, up = false, down = false, attack = false;
+    private volatile boolean attackTriggerPending = false;
     private ClientApp clientAppRef = null;
 
     private boolean showHud = true;
@@ -74,8 +78,23 @@ public class ClientGame extends JPanel {
         this.clientAppRef = app;
     }
 
+    public void setMyId(String id) {
+        this.myId = id == null ? "" : id;
+    }
+
+    public boolean isMe(GameData.PlayerState p) {
+        if (p == null) return false;
+        if (myId != null && !myId.isEmpty()) {
+            return myId.equals(p.id);
+        }
+        return p.name != null && p.name.equals(myName);
+    }
+
     private void triggerAttack(boolean isPressed) {
         this.attack = isPressed;
+        if (isPressed) {
+            this.attackTriggerPending = true;
+        }
         if (clientAppRef != null) {
             clientAppRef.sendAttackInput(isPressed);
         }
@@ -103,6 +122,11 @@ public class ClientGame extends JPanel {
 
             slimeSprites[0] = ImageIO.read(new File(mPath + "greenslime_down_1.png"));
             slimeSprites[1] = ImageIO.read(new File(mPath + "greenslime_down_2.png"));
+
+            File potionFile = new File("source/content/object/healthposion.png");
+            if (potionFile.exists()) {
+                potionImage = ImageIO.read(potionFile);
+            }
 
         } catch (Exception e) {
             System.err.println("[ClientGame] Lỗi nạp hình ảnh: " + e.getMessage());
@@ -133,11 +157,18 @@ public class ClientGame extends JPanel {
     public void startOfflineMode(String playerName) {
         stopOfflineMode();
         this.myName = playerName;
+        this.myId = "LOCAL_1";
 
         localPlayer = new GameData.PlayerState("LOCAL_1", myName);
         previousLocalAttack = false;
         renderPlayers = new ConcurrentHashMap<>();
         renderMonsters = new ConcurrentHashMap<>();
+        renderItems = new ConcurrentHashMap<>();
+
+        for (int i = 1; i <= 8; i++) {
+            Point pt = getRandomMapPoint();
+            renderItems.put("POTION_" + i, new GameData.ItemState("POTION_" + i, "potion", pt.x, pt.y));
+        }
 
         for (int i = 1; i <= 15; i++) {
             Point pt;
@@ -168,7 +199,9 @@ public class ClientGame extends JPanel {
                 localPlayer.down = down;
 
                 long wallNow = System.currentTimeMillis();
-                if (attack && !previousLocalAttack && !localPlayer.isAttacking) {
+                boolean attackReq = attackTriggerPending || (attack && !previousLocalAttack);
+                attackTriggerPending = false;
+                if (attackReq && !localPlayer.isAttacking) {
                     localPlayer.isAttacking = true;
                     localPlayer.attackTicks = 0;
                     Rectangle attackBox = GamePhysics.getAttackHitbox(
@@ -183,6 +216,10 @@ public class ClientGame extends JPanel {
                                 m.respawnTimer = 180;
                                 m.currentPath = new int[0][2];
                                 m.pathIndex = 0;
+                                if (rand.nextBoolean()) {
+                                    String dropId = "DROP_" + System.currentTimeMillis() + "_" + m.id;
+                                    renderItems.put(dropId, new GameData.ItemState(dropId, "potion", m.x, m.y));
+                                }
                             }
                         }
                     }
@@ -190,6 +227,33 @@ public class ClientGame extends JPanel {
                 previousLocalAttack = attack;
 
                 GamePhysics.updatePlayer(localPlayer, mapManager, dt);
+
+                Rectangle playerBox = GamePhysics.getEntityBounds(localPlayer.x, localPlayer.y);
+                Rectangle itemBox = new Rectangle(0, 0, GamePhysics.ENTITY_SIZE, GamePhysics.ENTITY_SIZE);
+                for (GameData.ItemState item : renderItems.values()) {
+                    if (item.collected) {
+                        if (item.respawnTimer > 0) {
+                            if (--item.respawnTimer <= 0) {
+                                Point spawn = getRandomMapPoint();
+                                item.x = spawn.x;
+                                item.y = spawn.y;
+                                item.collected = false;
+                            }
+                        } else {
+                            renderItems.remove(item.id);
+                        }
+                        continue;
+                    }
+
+                    itemBox.setBounds((int) item.x, (int) item.y, GamePhysics.ENTITY_SIZE, GamePhysics.ENTITY_SIZE);
+                    if (localPlayer.hp > 0 && localPlayer.hp < localPlayer.maxHp && playerBox.intersects(itemBox)) {
+                        localPlayer.hp = Math.min(localPlayer.maxHp, localPlayer.hp + item.healAmount);
+                        item.collected = true;
+                        if (item.id.startsWith("POTION_")) {
+                            item.respawnTimer = 900;
+                        }
+                    }
+                }
 
                 for (GameData.MonsterState m : renderMonsters.values()) {
                     if (m.isDead) {
@@ -234,7 +298,14 @@ public class ClientGame extends JPanel {
     }
 
     public void updateOnlineWorld(String stateLine, String myCurrentName) {
+        updateOnlineWorld(stateLine, myCurrentName, null);
+    }
+
+    public void updateOnlineWorld(String stateLine, String myCurrentName, String myCurrentId) {
         this.myName = myCurrentName;
+        if (myCurrentId != null && !myCurrentId.isEmpty()) {
+            this.myId = myCurrentId;
+        }
         GameData.WorldSnapshot snapshot = GameProtocol.parseSnapshot(stateLine);
         long now = System.currentTimeMillis();
         Map<String, GameData.PlayerState> previousPlayers = renderPlayers;
@@ -247,7 +318,7 @@ public class ClientGame extends JPanel {
                 p.attackTicks = previous.isAttacking ? previous.attackTicks + 1 : 0;
             }
             updatedPlayers.put(p.id, p);
-            if (p.name.equals(myName)) {
+            if (isMe(p)) {
                 movement.onServerState(p.x, p.y, p.lastAckSeq);
             }
         }
@@ -261,6 +332,12 @@ public class ClientGame extends JPanel {
             updatedMonsters.put(m.id, m);
         }
         renderMonsters = updatedMonsters;
+
+        Map<String, GameData.ItemState> updatedItems = new ConcurrentHashMap<>();
+        for (GameData.ItemState it : snapshot.items) {
+            updatedItems.put(it.id, it);
+        }
+        renderItems = updatedItems;
 
         repaint();
     }
@@ -295,7 +372,7 @@ public class ClientGame extends JPanel {
         int myMaxHp = 100;
 
         for (GameData.PlayerState p : playersSnapshot.values()) {
-            if (p.name.equals(myName)) {
+            if (isMe(p)) {
                 myX = (int) p.x;
                 myY = (int) p.y;
                 myHp = p.hp;
@@ -315,6 +392,28 @@ public class ClientGame extends JPanel {
         if (totalMapHeight > getHeight()) camY = Math.max(0, Math.min(camY, totalMapHeight - getHeight()));
 
         int entitySize = GamePhysics.ENTITY_SIZE;
+
+        // 0. Vẽ Vật phẩm (Bình máu)
+        Map<String, GameData.ItemState> itemsSnapshot = renderItems;
+        for (GameData.ItemState item : itemsSnapshot.values()) {
+            if (item.collected) continue;
+            int screenX = (int) item.x - camX;
+            int screenY = (int) item.y - camY;
+
+            if (screenX + entitySize < 0 || screenX > getWidth()
+                    || screenY + entitySize < 0 || screenY > getHeight()) {
+                continue;
+            }
+
+            if (potionImage != null) {
+                g2.drawImage(potionImage, screenX, screenY, entitySize, entitySize, null);
+            } else {
+                g2.setColor(new Color(230, 40, 40));
+                g2.fillOval(screenX + 8, screenY + 8, entitySize - 16, entitySize - 16);
+                g2.setColor(Color.WHITE);
+                g2.drawString("+HP", screenX + 10, screenY + entitySize / 2 + 4);
+            }
+        }
 
         // 1. Vẽ Quái Slime
         for (GameData.MonsterState m : monstersSnapshot.values()) {
@@ -393,7 +492,7 @@ public class ClientGame extends JPanel {
                     g2.drawImage(currentSprite, screenX, screenY, entitySize, entitySize, null);
                 }
             } else {
-                g2.setColor(p.name.equals(myName) ? Color.CYAN : Color.BLUE);
+                g2.setColor(isMe(p) ? Color.CYAN : Color.BLUE);
                 g2.fillRect(screenX, screenY, entitySize, entitySize);
             }
 
@@ -404,12 +503,13 @@ public class ClientGame extends JPanel {
 
             g2.setColor(Color.WHITE);
             g2.setFont(new Font("Arial", Font.BOLD, 12));
-            g2.drawString(p.name, screenX - 5, screenY - 10);
+            g2.drawString(p.name != null ? p.name : "Player", screenX - 5, screenY - 10);
 
             g2.setColor(Color.RED);
             g2.fillRect(screenX, screenY - 5, entitySize, 4);
             g2.setColor(Color.CYAN);
-            g2.fillRect(screenX, screenY - 5, (int)(entitySize * ((float)p.hp / p.maxHp)), 4);
+            int barW = Math.max(0, Math.min(entitySize, (int)(entitySize * ((float)Math.max(0, p.hp) / Math.max(1, p.maxHp)))));
+            g2.fillRect(screenX, screenY - 5, barW, 4);
         }
 
         // 3. Hiển thị HUD cá nhân & Máu người chơi

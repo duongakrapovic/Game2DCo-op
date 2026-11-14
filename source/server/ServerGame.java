@@ -11,6 +11,7 @@ import java.awt.Rectangle;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class ServerGame implements Runnable {
 
@@ -21,10 +22,13 @@ public class ServerGame implements Runnable {
     private final String roomId;
     private final Map<String, GameData.PlayerState> players = new ConcurrentHashMap<>();
     private final Map<String, GameData.MonsterState> monsters = new ConcurrentHashMap<>();
+    private final Map<String, GameData.ItemState> items = new ConcurrentHashMap<>();
+    private final AtomicInteger itemCounter = new AtomicInteger(1);
     private final Map<String, ServerNetwork.ClientHandler> clientHandlers = new ConcurrentHashMap<>();
     private final Map<String, Integer> lastAcks = new ConcurrentHashMap<>();
     private final Map<String, Boolean> attackInputs = new ConcurrentHashMap<>();
     private final Map<String, Boolean> previousAttackInputs = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> pendingAttackTriggers = new ConcurrentHashMap<>();
 
     private final GameMap mapManager;
     private final Random random = new Random();
@@ -42,6 +46,13 @@ public class ServerGame implements Runnable {
         for (int i = 1; i <= MONSTER_COUNT; i++) {
             Point spawn = findRandomMapPoint();
             monsters.put("M" + i, new GameData.MonsterState("M" + i, spawn.x, spawn.y));
+        }
+
+        // Sinh 8 bình máu rải rác trên bản đồ khi tạo phòng
+        for (int i = 1; i <= 8; i++) {
+            Point spawn = findRandomMapPoint();
+            String id = "POTION_" + itemCounter.getAndIncrement();
+            items.put(id, new GameData.ItemState(id, "HEAL", spawn.x, spawn.y));
         }
 
         loopThread = new Thread(this, "RoomLoop-" + roomId);
@@ -87,6 +98,7 @@ public class ServerGame implements Runnable {
         }
         attackInputs.put(playerId, false);
         previousAttackInputs.put(playerId, false);
+        pendingAttackTriggers.remove(playerId);
     }
 
     public void removePlayer(String playerId) {
@@ -95,6 +107,7 @@ public class ServerGame implements Runnable {
         lastAcks.remove(playerId);
         attackInputs.remove(playerId);
         previousAttackInputs.remove(playerId);
+        pendingAttackTriggers.remove(playerId);
     }
 
     public void updateAck(String playerId, int sequence) {
@@ -107,6 +120,9 @@ public class ServerGame implements Runnable {
     public void updateAttackInput(String playerId, boolean pressed) {
         if (players.containsKey(playerId)) {
             attackInputs.put(playerId, pressed);
+            if (pressed) {
+                pendingAttackTriggers.put(playerId, true);
+            }
         }
     }
 
@@ -128,6 +144,7 @@ public class ServerGame implements Runnable {
             }
 
             updateMonsters();
+            updateItems();
             broadcastTcpState();
 
             nextTick += Common.TICK_NS;
@@ -149,7 +166,10 @@ public class ServerGame implements Runnable {
     private void updatePlayerAttack(GameData.PlayerState player) {
         boolean pressed = attackInputs.getOrDefault(player.id, false);
         boolean previouslyPressed = previousAttackInputs.getOrDefault(player.id, false);
-        if (pressed && !previouslyPressed && !player.isAttacking) {
+        boolean queuedTrigger = Boolean.TRUE.equals(pendingAttackTriggers.remove(player.id));
+        boolean shouldTrigger = (queuedTrigger || (pressed && !previouslyPressed)) && !player.isAttacking;
+
+        if (shouldTrigger) {
             player.isAttacking = true;
             player.attackTicks = 0;
             long now = System.currentTimeMillis();
@@ -166,6 +186,11 @@ public class ServerGame implements Runnable {
                         monster.respawnTimer = randomRespawnTicks();
                         monster.currentPath = new int[0][2];
                         monster.pathIndex = 0;
+                        // 50% tỉ lệ rơi bình máu khi hạ gục quái
+                        if (random.nextBoolean()) {
+                            String dropId = "DROP_" + itemCounter.getAndIncrement();
+                            items.put(dropId, new GameData.ItemState(dropId, "HEAL", monster.x, monster.y));
+                        }
                     }
                 }
             }
@@ -263,6 +288,42 @@ public class ServerGame implements Runnable {
                 + random.nextInt(RESPAWN_MAX_TICKS - RESPAWN_MIN_TICKS + 1);
     }
 
+    private void updateItems() {
+        Rectangle pickupBox = new Rectangle(0, 0, GamePhysics.ENTITY_SIZE, GamePhysics.ENTITY_SIZE);
+        for (GameData.ItemState item : items.values()) {
+            if (item.collected) {
+                if (item.respawnTimer > 0) {
+                    if (--item.respawnTimer <= 0) {
+                        Point spawn = findRandomMapPoint();
+                        item.x = spawn.x;
+                        item.y = spawn.y;
+                        item.collected = false;
+                    }
+                } else {
+                    // Bình máu rơi từ quái sau khi nhặt xong thì xóa để tránh phình bộ nhớ và phình gói tin mạng
+                    items.remove(item.id);
+                }
+                continue;
+            }
+
+            pickupBox.setBounds((int) item.x, (int) item.y, GamePhysics.ENTITY_SIZE, GamePhysics.ENTITY_SIZE);
+            for (GameData.PlayerState player : players.values()) {
+                if (player.hp > 0 && player.hp < player.maxHp) {
+                    Rectangle playerBox = GamePhysics.getEntityBounds(player.x, player.y);
+                    if (playerBox.intersects(pickupBox)) {
+                        player.hp = Math.min(player.maxHp, player.hp + item.healAmount);
+                        item.collected = true;
+                        // Bình máu rơi từ quái nhặt xong là biến mất, bình máu map tự respawn sau 15s (900 ticks)
+                        if (item.id.startsWith("POTION_")) {
+                            item.respawnTimer = 900;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     private void broadcastTcpState() {
         if (players.isEmpty()) {
             return;
@@ -274,6 +335,7 @@ public class ServerGame implements Runnable {
             snapshot.players.add(player);
         }
         snapshot.monsters.addAll(monsters.values());
+        snapshot.items.addAll(items.values());
 
         String stateMessage = GameProtocol.serializeSnapshot(snapshot);
         for (ServerNetwork.ClientHandler handler : clientHandlers.values()) {

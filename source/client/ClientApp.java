@@ -62,6 +62,11 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
                 stopVoiceChat();
                 if (netClient != null) netClient.close();
             }
+
+            @Override
+            public void windowLostFocus(WindowEvent e) {
+                resetInputState();
+            }
         });
     }
 
@@ -88,12 +93,11 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         gbc.gridy = 3; panel.add(btnExit, gbc);
 
         btnOffline.addActionListener(e -> {
-            gamePanel.stopOfflineMode();
             stopVoiceChat();
             if (netClient != null) netClient.close();
             setTitle("Dungeon Co-op [OFFLINE]");
-            gamePanel.startOfflineMode(myName);
             switchToGameScene();
+            gamePanel.startOfflineMode(myName);
         });
 
         btnOnline.addActionListener(e -> cardLayout.show(mainContainer, "LOBBY"));
@@ -120,6 +124,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         topBar.setOpaque(false);
         JButton btnBack = new JButton("Quay lại Menu");
         btnBack.addActionListener(e -> {
+            resetInputState();
             stopVoiceChat();
             if (netClient != null) netClient.close();
             cardLayout.show(mainContainer, "MENU");
@@ -234,6 +239,8 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     }
 
     private void switchToGameScene() {
+        gamePanel.stopOfflineMode();
+        resetInputState();
         cardLayout.show(mainContainer, "GAME");
         SwingUtilities.invokeLater(() -> {
             gamePanel.setFocusable(true);
@@ -279,9 +286,15 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         gamePanel.getActionMap().put("esc", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) {
                 if (JOptionPane.showConfirmDialog(ClientApp.this, "Về Menu chính?", "Thoát", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
+                    resetInputState();
                     gamePanel.stopOfflineMode();
                     stopVoiceChat();
-                    if (netClient != null) netClient.close();
+                    if (netClient != null) {
+                        if (netClient.getState() == ClientNetwork.State.CONNECTED) {
+                            netClient.send(Common.CMD_LEAVE_ROOM);
+                        }
+                        netClient.close();
+                    }
                     cardLayout.show(mainContainer, "MENU");
                 }
             }
@@ -334,6 +347,18 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         }
     }
 
+    private void resetInputState() {
+        gamePanel.left = false;
+        gamePanel.right = false;
+        gamePanel.up = false;
+        gamePanel.down = false;
+        sendAttackInput(false);
+        if (netClient != null && netClient.getState() == ClientNetwork.State.CONNECTED) {
+            ClientMovement.PredictionInput input = movement.step(false, false, false, false, false);
+            netClient.send("INPUT:false:false:false:false:" + input.seq + ":false");
+        }
+    }
+
     private void updateKey(String dir, boolean pressed) {
         switch (dir) {
             case "left": gamePanel.left = pressed; break;
@@ -360,11 +385,13 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             SwingUtilities.invokeLater(this::switchToGameScene);
             SwingUtilities.invokeLater(this::startVoiceChat);
         } else if (line.startsWith("RESUMED:")) {
+            SwingUtilities.invokeLater(this::switchToGameScene);
             SwingUtilities.invokeLater(this::startVoiceChat);
         } else if ("LEFT".equals(line)) {
             SwingUtilities.invokeLater(this::stopVoiceChat);
         } else if (line.startsWith(Common.CMD_STATE)) {
-            gamePanel.updateOnlineWorld(line, myName);
+            String myId = netClient != null ? netClient.getMyId() : null;
+            gamePanel.updateOnlineWorld(line, myName, myId);
             updateHudDisplay();
         } else if (line.startsWith(Common.CMD_ERROR)) {
             pendingRoomCommand = null;
@@ -425,7 +452,10 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     public void onSessionLost(String reason) {
         pendingRoomCommand = null;
         SwingUtilities.invokeLater(this::stopVoiceChat);
-        SwingUtilities.invokeLater(() -> cardLayout.show(mainContainer, "MENU"));
+        SwingUtilities.invokeLater(() -> {
+            resetInputState();
+            cardLayout.show(mainContainer, "MENU");
+        });
     }
 
     public static void main(String[] args) {
