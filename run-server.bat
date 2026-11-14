@@ -7,11 +7,11 @@ echo ==================================================
 echo      DUNGEON CO-OP - DEDICATED SERVER SYSTEM
 echo ==================================================
 
-echo [1/3] Dang don dep file .class cu cua Common ^& Server...
-del /s /q source\common\*.class source\server\*.class >nul 2>&1
+echo [1/3] Don dep file .class cu...
+for /r source %%f in (*.class) do del /q "%%f" >nul 2>&1
 
-echo [2/3] Dang bien dich DUY NHAT source/common va source/server...
-javac -encoding UTF-8 source/common/*.java source/server/*.java
+echo [2/3] Bien dich Server...
+javac -J-XX:+UseSerialGC -J-Xss256k -J-Xmx128m -J-Xms16m -encoding UTF-8 source/common/*.java source/server/*.java
 if %errorlevel% neq 0 (
     echo.
     echo ==================================================
@@ -23,7 +23,7 @@ if %errorlevel% neq 0 (
 
 echo [3/3] Bien dich thanh cong! Dang khoi chay Dedicated Server...
 echo --------------------------------------------------
-java -Dfile.encoding=UTF-8 -cp . source.server.ServerApp
+java -XX:+UseSerialGC -Xss256k -Xmx256m -Xms32m -Dfile.encoding=UTF-8 -cp . source.server.ServerApp
 
 if %errorlevel% neq 0 (
     echo.
