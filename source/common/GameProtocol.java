@@ -106,18 +106,20 @@ public class GameProtocol {
                     if (item.trim().isEmpty()) continue;
                     String[] pData = item.split(",");
                     if (pData.length >= 10) {
-                        GameData.PlayerState p = new GameData.PlayerState();
-                        p.id = pData[0];
-                        p.name = pData[1];
-                        p.x = Float.parseFloat(pData[2]);
-                        p.y = Float.parseFloat(pData[3]);
-                        p.direction = pData[4];
-                        p.spriteNum = Integer.parseInt(pData[5]);
-                        p.hp = Integer.parseInt(pData[6]);
-                        p.maxHp = Integer.parseInt(pData[7]);
-                        p.isAttacking = "1".equals(pData[8]);
-                        p.lastAckSeq = Integer.parseInt(pData[9]);
-                        snapshot.players.add(p);
+                        try {
+                            GameData.PlayerState p = new GameData.PlayerState();
+                            p.id = pData[0];
+                            p.name = pData[1];
+                            p.x = Float.parseFloat(pData[2]);
+                            p.y = Float.parseFloat(pData[3]);
+                            p.direction = pData[4];
+                            p.spriteNum = Integer.parseInt(pData[5]);
+                            p.hp = Integer.parseInt(pData[6]);
+                            p.maxHp = Integer.parseInt(pData[7]);
+                            p.isAttacking = "1".equals(pData[8]);
+                            p.lastAckSeq = Integer.parseInt(pData[9]);
+                            snapshot.players.add(p);
+                        } catch (NumberFormatException ignored) {}
                     }
                 }
             } else if (sec.startsWith("MONSTERS:")) {
@@ -127,14 +129,16 @@ public class GameProtocol {
                     if (item.trim().isEmpty()) continue;
                     String[] mData = item.split(",");
                     if (mData.length >= 9) {
-                        GameData.MonsterState m = new GameData.MonsterState(mData[0], Float.parseFloat(mData[2]), Float.parseFloat(mData[3]));
-                        m.type = mData[1];
-                        m.direction = mData[4];
-                        m.spriteNum = Integer.parseInt(mData[5]);
-                        m.hp = Integer.parseInt(mData[6]);
-                        m.maxHp = Integer.parseInt(mData[7]);
-                        m.isDead = "1".equals(mData[8]);
-                        snapshot.monsters.add(m);
+                        try {
+                            GameData.MonsterState m = new GameData.MonsterState(mData[0], Float.parseFloat(mData[2]), Float.parseFloat(mData[3]));
+                            m.type = mData[1];
+                            m.direction = mData[4];
+                            m.spriteNum = Integer.parseInt(mData[5]);
+                            m.hp = Integer.parseInt(mData[6]);
+                            m.maxHp = Integer.parseInt(mData[7]);
+                            m.isDead = "1".equals(mData[8]);
+                            snapshot.monsters.add(m);
+                        } catch (NumberFormatException ignored) {}
                     }
                 }
             } else if (sec.startsWith("ITEMS:")) {
@@ -144,9 +148,11 @@ public class GameProtocol {
                     if (item.trim().isEmpty()) continue;
                     String[] iData = item.split(",");
                     if (iData.length >= 5) {
-                        GameData.ItemState it = new GameData.ItemState(iData[0], iData[1], Float.parseFloat(iData[2]), Float.parseFloat(iData[3]));
-                        it.collected = "1".equals(iData[4]);
-                        snapshot.items.add(it);
+                        try {
+                            GameData.ItemState it = new GameData.ItemState(iData[0], iData[1], Float.parseFloat(iData[2]), Float.parseFloat(iData[3]));
+                            it.collected = "1".equals(iData[4]);
+                            snapshot.items.add(it);
+                        } catch (NumberFormatException ignored) {}
                     }
                 }
             }

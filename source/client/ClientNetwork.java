@@ -73,38 +73,44 @@ public class ClientNetwork {
                 attempt = 0;
                 reconnectCount++;
 
-                ScheduledExecutorService pingExec = Executors.newSingleThreadScheduledExecutor();
-                pingExec.scheduleAtFixedRate(() -> {
-                    if (socket != null && socket.isConnected() && !socket.isClosed()) {
-                        lastPingSentTime = System.nanoTime();
-                        sendRaw("PING:" + lastPingSentTime);
-                    }
-                }, 1000, 1000, TimeUnit.MILLISECONDS);
+                ScheduledExecutorService pingExec = Executors.newSingleThreadScheduledExecutor(r -> {
+                    Thread t = new Thread(r, "Client-Ping");
+                    t.setDaemon(true);
+                    return t;
+                });
+                try {
+                    pingExec.scheduleAtFixedRate(() -> {
+                        if (socket != null && socket.isConnected() && !socket.isClosed()) {
+                            lastPingSentTime = System.nanoTime();
+                            sendRaw("PING:" + lastPingSentTime);
+                        }
+                    }, 1000, 1000, TimeUnit.MILLISECONDS);
 
-                String line;
-                while ((line = GameProtocol.readLineLimited(in, GameProtocol.MAX_LINE_LENGTH_SERVER)) != null) {
-                    final String msg = line;
-                    if (msg.startsWith("WELCOME:")) {
-                        String[] p = msg.split(":");
-                        if (p.length >= 2) myId = p[1];
-                        if (p.length >= 3) sessionToken = p[2];
-                    } else if (msg.startsWith("PONG:")) {
-                        try {
-                            long sent = Long.parseLong(msg.substring(5));
-                            double rtt = (System.nanoTime() - sent) / 1e6;
-                            jitterMs = Math.abs(rtt - rttMs) * 0.2 + jitterMs * 0.8;
-                            rttMs = rtt;
-                        } catch (Exception ignored) {}
-                    }
+                    String line;
+                    while ((line = GameProtocol.readLineLimited(in, GameProtocol.MAX_LINE_LENGTH_SERVER)) != null) {
+                        final String msg = line;
+                        if (msg.startsWith("WELCOME:")) {
+                            String[] p = msg.split(":");
+                            if (p.length >= 2) myId = p[1];
+                            if (p.length >= 3) sessionToken = p[2];
+                        } else if (msg.startsWith("PONG:")) {
+                            try {
+                                long sent = Long.parseLong(msg.substring(5));
+                                double rtt = (System.nanoTime() - sent) / 1e6;
+                                jitterMs = Math.abs(rtt - rttMs) * 0.2 + jitterMs * 0.8;
+                                rttMs = rtt;
+                            } catch (Exception ignored) {}
+                        }
 
-                    if (simulatedLagMs > 0) {
-                        lagScheduler.schedule(() -> listener.onMessage(msg), simulatedLagMs, TimeUnit.MILLISECONDS);
-                    } else {
-                        listener.onMessage(msg);
+                        if (simulatedLagMs > 0) {
+                            lagScheduler.schedule(() -> listener.onMessage(msg), simulatedLagMs, TimeUnit.MILLISECONDS);
+                        } else {
+                            listener.onMessage(msg);
+                        }
                     }
+                } finally {
+                    pingExec.shutdownNow();
                 }
-
-                pingExec.shutdownNow();
             } catch (Exception e) {
                 if (!running) break;
                 attempt++;

@@ -299,6 +299,9 @@ public class ServerGame implements Runnable {
                         item.y = spawn.y;
                         item.collected = false;
                     }
+                } else {
+                    // Bình máu rơi từ quái sau khi nhặt xong thì xóa để tránh phình bộ nhớ và phình gói tin mạng
+                    items.remove(item.id);
                 }
                 continue;
             }

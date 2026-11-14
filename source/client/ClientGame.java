@@ -157,6 +157,7 @@ public class ClientGame extends JPanel {
     public void startOfflineMode(String playerName) {
         stopOfflineMode();
         this.myName = playerName;
+        this.myId = "LOCAL_1";
 
         localPlayer = new GameData.PlayerState("LOCAL_1", myName);
         previousLocalAttack = false;
@@ -238,6 +239,8 @@ public class ClientGame extends JPanel {
                                 item.y = spawn.y;
                                 item.collected = false;
                             }
+                        } else {
+                            renderItems.remove(item.id);
                         }
                         continue;
                     }
@@ -500,7 +503,7 @@ public class ClientGame extends JPanel {
 
             g2.setColor(Color.WHITE);
             g2.setFont(new Font("Arial", Font.BOLD, 12));
-            g2.drawString(p.name, screenX - 5, screenY - 10);
+            g2.drawString(p.name != null ? p.name : "Player", screenX - 5, screenY - 10);
 
             g2.setColor(Color.RED);
             g2.fillRect(screenX, screenY - 5, entitySize, 4);

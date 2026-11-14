@@ -93,12 +93,11 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         gbc.gridy = 3; panel.add(btnExit, gbc);
 
         btnOffline.addActionListener(e -> {
-            gamePanel.stopOfflineMode();
             stopVoiceChat();
             if (netClient != null) netClient.close();
             setTitle("Dungeon Co-op [OFFLINE]");
-            gamePanel.startOfflineMode(myName);
             switchToGameScene();
+            gamePanel.startOfflineMode(myName);
         });
 
         btnOnline.addActionListener(e -> cardLayout.show(mainContainer, "LOBBY"));
@@ -240,6 +239,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     }
 
     private void switchToGameScene() {
+        gamePanel.stopOfflineMode();
         resetInputState();
         cardLayout.show(mainContainer, "GAME");
         SwingUtilities.invokeLater(() -> {
@@ -385,6 +385,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             SwingUtilities.invokeLater(this::switchToGameScene);
             SwingUtilities.invokeLater(this::startVoiceChat);
         } else if (line.startsWith("RESUMED:")) {
+            SwingUtilities.invokeLater(this::switchToGameScene);
             SwingUtilities.invokeLater(this::startVoiceChat);
         } else if ("LEFT".equals(line)) {
             SwingUtilities.invokeLater(this::stopVoiceChat);
