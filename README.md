@@ -9,7 +9,7 @@
 | STT | Họ và Tên | MSSV | Email | Đóng góp |
 |-----|-----------|------|-------|----------|
 | 1 | Trần Văn Đức | B23DCCN191 | b23dccn191@ptit.edu.vn | *(xem commit history)* |
-| 2 | Nguyễn Minh Hiền | B23DCCN289 | b23dccn289@ptit.edu.vn | *(xem commit history)* |
+| 2 | Nguyễn Minh Hiển | B23DCCN289 | b23dccn289@ptit.edu.vn | *(xem commit history)* |
 | 3 | Vũ Hải Dương | B23DCCN233 | b23dccn233@ptit.edu.vn | *(xem commit history)* |
 
 **Tên nhóm:** Nhóm 6 – Lập trình mạng  
@@ -21,15 +21,16 @@
 
 Hệ thống là một **game 2D top-down co-op nhiều người chơi** xây dựng hoàn toàn bằng Java thuần.
 
-- **Server** (Dedicated Server): Tiếp nhận kết nối TCP từ nhiều client, quản lý các phòng chơi (Game Room), chạy vòng lặp vật lý game ở tốc độ 60 FPS và broadcast trạng thái game cho toàn bộ người chơi trong phòng.
-- **Client**: Giao diện đồ họa Java Swing, cho phép người chơi tạo/vào phòng, di chuyển nhân vật bằng phím WASD hoặc mũi tên. Client hỗ trợ cả chế độ **Offline Test** (không cần server) lẫn **Online** (kết nối server qua TCP).
+- **Server** (Dedicated Server): Tiếp nhận kết nối TCP từ nhiều client, quản lý các phòng chơi (Game Room), chạy vòng lặp vật lý game ở tốc độ 60 FPS, broadcast trạng thái game và relay voice qua UDP trong cùng phòng.
+- **Client**: Giao diện đồ họa Java Swing, cho phép người chơi tạo/vào phòng, di chuyển nhân vật bằng phím WASD hoặc mũi tên. Client hỗ trợ cả chế độ **Offline** lẫn **Online**, có open-mic voice chat và điều khiển mute.
 - **Common**: Module dùng chung giữa server và client — hằng số giao thức, quản lý bản đồ (Tiled TMX chunks), vật lý va chạm.
 
 **Cấu trúc logic tổng quát:**
 ```
 [ClientApp A] ──┐
 [ClientApp B] ──┼──TCP:8888──► [ServerApp]
-[ClientApp C] ──┘                   │
+[ClientApp C] ──┘      UDP:8888──► [Voice Relay]
+                                     │
                                [ServerGame]
                                (quản lý phòng, physics 60 tick/s)
                                     │
@@ -48,11 +49,11 @@ Hệ thống là một **game 2D top-down co-op nhiều người chơi** xây d�
 | Thành phần | Công nghệ | Ghi chú |
 |------------|-----------|---------|
 | Ngôn ngữ | Java 17+ | Không cần framework ngoài |
-| Giao thức mạng | TCP Socket (java.net) | Plain-text, line-delimited |
+| Giao thức mạng | TCP + UDP Socket (java.net) | Game commands dạng dòng; voice PCM qua UDP relay |
 | Giao diện | Java Swing (JFrame, JPanel) | Render tile map + player |
 | Bản đồ | Tiled TMX (CSV encoding) | 9 chunk 32×32 tiles |
 | Build | `javac` + `.bat` script | Không cần Maven/Gradle |
-| Port | `8888` | Có thể đổi trong `Common.java` |
+| Port | `8888` | Mở cả TCP và UDP trên máy chủ |
 
 ---
 
@@ -72,7 +73,7 @@ Double-click file `run-server.bat` hoặc chạy lệnh:
 ```bash
 run-server.bat
 ```
-Server sẽ tự động compile và lắng nghe tại **port 8888**.
+Server sẽ tự động compile và lắng nghe TCP và UDP tại **port 8888**.
 
 ### 3. Chạy Client
 Double-click file `run-client.bat` hoặc chạy lệnh:
@@ -91,11 +92,9 @@ Khi khởi động, client hiển thị hộp thoại chọn chế độ:
 | `A` / `←` | Di chuyển trái |
 | `D` / `→` | Di chuyển phải |
 | `ESC` | Thoát về menu |
-| `F3` | Bật/tắt HUD mạng (ping, jitter, băng thông, sai số) |
-| `F4` | Đổi độ trễ giả lập mỗi chiều: 0 → 50 → 100 → 200 → 400 ms |
-| `F6` / `F7` | Bật/tắt dự đoán (prediction) / nội suy (interpolation) — để so sánh khi demo |
-| `F8` | Đổi độ trễ nội suy: 50 / 100 / 150 / 250 ms |
-| `F9` | Giả lập rớt mạng (client tự kết nối lại) |
+| `M` | Tắt/bật micro trong phòng online |
+
+Prediction, reconciliation và nội suy người chơi khác luôn chạy mặc định.
 
 ### 5. Chơi Online (nhiều người)
 1. Một người chạy `run-server.bat`
@@ -123,7 +122,7 @@ tự lọc các ký tự này (xem `Protocol.sanitizeName / sanitizeRoom`). Clie
 | Vào phòng | `JOIN_ROOM:<phòng>:<tên>` | Vào phòng có sẵn (tối đa `MAX_PLAYERS_PER_ROOM` = 4). Tự rời phòng cũ nếu đang ở phòng khác |
 | Rời phòng | `LEAVE_ROOM` | Rời phòng, về sảnh |
 | Gửi đầu vào | `INPUT:<left>:<right>:<up>:<down>[:<seq>[:<attack>]]` | Trạng thái di chuyển, sequence và cờ attack; các trường cuối có thể bỏ qua với client cũ |
-| Heartbeat | `PING:<t>` | Mỗi 1 giây; server trả nguyên `t` trong `PONG` |
+| Heartbeat | `PING:<t>` | Client gửi định kỳ; server phản hồi `PONG:<t>` để giữ kết nối hoạt động |
 | Kết nối lại | `RESUME:<token>` | Gửi trên kết nối mới sau khi rớt mạng để lấy lại chỗ trong phòng |
 
 ### Server → Client
@@ -135,7 +134,7 @@ tự lọc các ký tự này (xem `Protocol.sanitizeName / sanitizeRoom`). Clie
 | Đã vào phòng | `JOINED:<phòng>` | Client chỉ chuyển sang màn hình game khi nhận được lệnh này |
 | Đã rời phòng | `LEFT` | Phản hồi `LEAVE_ROOM` |
 | Trạng thái game | `STATE#PLAYERS:<...>#MONSTERS:<...>` | Snapshot người chơi và slime do server phát ở 60 tick/s |
-| Trả lời ping | `PONG:<t>` | Echo của `PING` |
+| Heartbeat | `PONG:<t>` | Echo giá trị heartbeat; không dùng để đo hoặc hiển thị RTT |
 | Kết nối lại | `RESUMED:<phòng>` / `RESUME_FAIL` | Kết quả của `RESUME` |
 | Lỗi | `ERROR:<thôngBáo>` | Sai cú pháp, phòng đầy / đã tồn tại / không tồn tại... |
 
@@ -147,9 +146,12 @@ Client → Server : CREATE_ROOM:DungeonA:Duc
 Server → Client : JOINED:DungeonA
 Client → Server : INPUT:false:true:false:false:0:false  (tick 0: đi phải)
 Server → Client : STATE#PLAYERS:P1,Duc,...#MONSTERS:M1,SLIME,...
-Client → Server : PING:81234567890
-Server → Client : PONG:81234567890
 ```
+
+Voice dùng UDP trên cùng số cổng `8888` (socket riêng với TCP). Client đăng ký
+endpoint bằng token phiên; server chỉ xác nhận client đang ở phòng và relay các
+gói âm thanh đến những người chơi khác trong phòng đó. Dữ liệu giọng nói không
+đi qua giao thức dòng TCP.
 
 ---
 
@@ -158,57 +160,23 @@ Server → Client : PONG:81234567890
 | # | Cơ chế | Giải quyết vấn đề gì | Cài đặt |
 |---|--------|----------------------|---------|
 | 1 | **Tick cố định 60 Hz + xác nhận input có `seq`** | Server cập nhật vị trí và trạng thái phòng theo tick; `ack` xác nhận sequence input đã nhận | `ServerGame` |
-| 2 | **Client-side prediction + server reconciliation** | Nhân vật của mình phản hồi tức thì thay vì chờ RTT. Khi có `STATE`: bỏ input đã `ack`, lấy vị trí server làm gốc rồi chạy lại input chưa `ack` | `ClientPrediction` |
-| 3 | **Entity interpolation** | Người chơi khác di chuyển mượt dù gói đến không đều: vẽ "chậm 100 ms" và nội suy giữa 2 snapshot | `SnapshotInterpolator` |
-| 4 | **Heartbeat + timeout** | `PING/PONG` mỗi giây đo RTT & jitter; không nhận gì 6 s (client) / 10 s (server) ⇒ coi là rớt mạng | `NetClient`, `ClientHandler` |
-| 5 | **Tự kết nối lại (session resume)** | Rớt mạng không mất nhân vật: server giữ chỗ 20 s, client thử lại 1 s, 2 s, 3 s... và gửi `RESUME:<token>` | `NetClient`, `ServerApp`, `Session` |
-| 6 | **Gửi không chặn + gộp snapshot (back-pressure)** | Một client mạng chậm không được làm đứng cả phòng. Game loop chỉ bỏ vào hàng đợi; `STATE` cũ chưa gửi bị thay bằng bản mới | `OutChannel` |
-| 7 | **Kiểm tra dữ liệu & chống lạm dụng** | Lệnh sai/thiếu tham số → `ERROR` (không còn làm chết luồng); giới hạn độ dài dòng; tối đa 300 message/giây/client; lọc ký tự cấm; `TCP_NODELAY` | `ClientHandler`, `Protocol` |
-| 8 | **Quản lý phòng an toàn** | Mỗi client chỉ ở 1 phòng; giới hạn 4 người; phòng trống bị xóa **và dừng luồng game loop**; đẩy `ROOM_LIST` khi có thay đổi | `ServerApp` |
-| 9 | **Log & thống kê** | `logs/game_state_*.csv` (10 Hz, cột như `statics/dataset_sample.csv`), `logs/net_stats.csv` (client, msg/s, KB/s mỗi 5 s) | `GameLogger`, `ServerStats` |
-| 10 | **Giả lập mạng xấu để demo** | Thêm độ trễ giả lập mỗi chiều, bật/tắt prediction và interpolation, giả lập rớt mạng ngay trong game | `NetClient`, phím F3–F9 |
+| 2 | **Prediction + server reconciliation** | Điều khiển nhân vật cục bộ phản hồi ngay; khi nhận `STATE`, client xác nhận input đã nhận và hiệu chỉnh theo vị trí server. Luôn bật | `ClientMovement` |
+| 3 | **Nội suy người chơi khác** | Làm mượt vị trí người chơi từ các snapshot; luôn bật | `ClientMovement`, `ClientGame` |
+| 4 | **Tự kết nối lại (session resume)** | Server giữ chỗ 20 giây; client gửi `RESUME:<token>` trên kết nối mới | `ClientNetwork`, `ServerApp` |
+| 5 | **Voice chat theo phòng** | Open mic truyền PCM qua UDP relay; token phiên xác thực endpoint và server chỉ relay trong cùng phòng | `ClientVoiceChat`, `ServerNetwork` |
+| 6 | **Heartbeat kết nối** | Client gửi `PING` định kỳ, server phản hồi `PONG`; chỉ duy trì kết nối, không đo RTT | `ClientNetwork`, `ServerNetwork` |
+| 7 | **Quản lý phòng** | Giới hạn 4 người; phòng trống được xóa và dừng game loop | `ServerApp`, `ServerGame` |
+| 8 | **Kiểm tra dữ liệu** | Lệnh sai/thiếu tham số → `ERROR`; giới hạn độ dài dòng và lọc ký tự cấm | `ServerNetwork`, `GameProtocol` |
 
 
 ---
 
-## 📊 KẾT QUẢ THỰC NGHIỆM
+## 🎙️ VOICE CHAT
 
-### Giao diện (2 client trong 1 phòng; cửa sổ phải đang giả lập lag 100 ms mỗi chiều)
-
-![2 client online](./statics/demo_online_2clients.png)
-
-HUD (phím `F3`) hiển thị ping, jitter, số `STATE`/giây, băng thông và sai số reconcile. Khi mất kết nối:
-
-![Mất kết nối](./statics/demo_reconnect_banner.png)
-
-### Đo tải bằng bot (`run-bench.bat`)
-
-Mỗi bot gửi `INPUT` 60 lần/giây như client thật, 4 bot/phòng, chạy 10 giây. Server và bot chạy **cùng một máy** (localhost)
-nên RTT chỉ phản ánh chi phí xử lý của server, không phải độ trễ Internet.
-
-| Số bot | Số phòng | Rớt kết nối | RTT trung bình | RTT p95 | RTT lớn nhất | `STATE`/giây/bot | Tải xuống/bot | Tải lên/bot |
-|-------:|---------:|------------:|---------------:|--------:|-------------:|-----------------:|--------------:|------------:|
-| 4  | 1  | 0 | 0.71 ms | 3.32 ms | 6.33 ms  | 60.1 | 7.9 KB/s | 2.0 KB/s |
-| 16 | 4  | 0 | 0.47 ms | 1.35 ms | 9.54 ms  | 60.1 | 8.3 KB/s | 2.0 KB/s |
-| 40 | 10 | 0 | 0.32 ms | 1.03 ms | 5.52 ms  | 60.1 | 8.8 KB/s | 2.0 KB/s |
-| 80 | 20 | 0 | 0.24 ms | 0.59 ms | 11.81 ms | 60.1 | 9.5 KB/s | 2.0 KB/s |
-
-Nhận xét: tần suất cập nhật giữ đúng 60 Hz khi tăng từ 4 lên 80 client; tải xuống mỗi client chủ yếu phụ thuộc số người
-**trong cùng phòng** (mỗi `STATE` liệt kê mọi người trong phòng) chứ không phụ thuộc tổng số client. Kết quả thô nằm ở `logs/bench_results.csv`.
-
-### Kiểm thử tự động (`run-selftest.bat`) — 23 kiểm tra
-
-Bắt tay + heartbeat, lệnh sai/dòng quá dài không làm sập kết nối, lọc ký tự cấm, giới hạn 4 người/phòng, tự rời phòng cũ,
-`RESUME` sai token, vị trí server khớp mô phỏng cục bộ (có va chạm tường), sai số prediction < 0.5 px khi lag 100 ms,
-và tự kết nối lại sau khi rớt mạng (giữ nguyên id và vị trí).
-
-### Cách tự lặp lại thí nghiệm
-```bash
-run-server.bat                      # cửa sổ 1
-run-bench.bat localhost 40 10       # cửa sổ 2: 40 bot, 10 giây
-run-selftest.bat                    # cửa sổ 2: kiểm thử tự động
-# Demo lag: java -cp . source.client.ClientApp --lag=150  (hoặc bấm F4 trong game)
-```
+- Micro tự bật khi vào phòng online; nhấn `M` để tắt/bật micro. Voice dừng khi rời phòng hoặc thoát game.
+- Âm thanh mono PCM 16 kHz được gửi đến server qua UDP và relay cho người khác trong cùng phòng; client không gửi audio trực tiếp cho nhau.
+- Máy chủ cần mở cả **TCP 8888** cho game và **UDP 8888** cho voice. Cần thiết bị micro và loa/tai nghe để thu/phát âm thanh.
+- Nếu không có thiết bị âm thanh, trạng thái voice sẽ báo thiết bị nào không khả dụng; phần chơi game vẫn tiếp tục.
 
 ---
 
@@ -219,8 +187,6 @@ Game2DCo-op/
 ├── INSTRUCTION.md               ← Hướng dẫn GV (không chỉnh sửa)
 ├── run-server.bat               ← Compile + chạy server
 ├── run-client.bat               ← Compile + chạy client
-├── run-bench.bat                ← Đo tải bằng bot
-├── run-selftest.bat             ← Kiểm thử tự động phần mạng
 ├── statics/
 │   ├── diagram.png              ← Sơ đồ hệ thống
 │   ├── network_flow.png         ← Sơ đồ luồng giao tiếp
@@ -236,17 +202,15 @@ Game2DCo-op/
     │   └── MapManager.java      ← Nạp bản đồ TMX, va chạm tile
     ├── server/
     │   ├── ServerApp.java       ← Entry point, quản lý phòng và phiên
-    │   ├── ServerNetwork.java   ← TCP accept, đọc input và gửi snapshot
+    │   ├── ServerNetwork.java   ← TCP game protocol và UDP voice relay
     │   ├── ServerSession.java   ← ID, token và trạng thái phiên
     │   └── ServerGame.java      ← Phòng, game loop 60 Hz, slime và chiến đấu
     ├── client/
-    │   ├── ClientApp.java       ← UI Swing, lobby, vẽ, HUD
-    │   ├── NetClient.java       ← TCP, heartbeat, tự kết nối lại, giả lập lag
-    │   ├── ClientPrediction.java← Dự đoán + hòa giải
-    │   └── SnapshotInterpolator.java ← Nội suy người chơi khác
-    ├── tools/
-    │   ├── BotBench.java        ← Đo tải bằng bot
-    │   └── NetSelfTest.java     ← Kiểm thử tự động phần mạng
+    │   ├── ClientApp.java       ← UI Swing, lobby và điều khiển
+    │   ├── ClientNetwork.java   ← TCP và tự kết nối lại
+    │   ├── ClientMovement.java  ← Prediction, reconciliation và nội suy
+    │   ├── ClientGame.java      ← Render gameplay và trạng thái voice
+    │   └── ClientVoiceChat.java ← Thu/phát âm thanh và voice UDP
     └── content/
         ├── map/                 ← 9 chunk TMX (3×3) + tileset
         └── player/              ← Sprite nhân vật
@@ -260,7 +224,7 @@ Game2DCo-op/
 - [x] Giới hạn số người tối đa mỗi phòng (`MAX_PLAYERS_PER_ROOM`)
 - [ ] Thêm trạng thái `GAME_START` / `GAME_OVER`
 - [ ] Thêm mob/enemy do server điều khiển
-- [ ] Hỗ trợ kết nối qua Internet với ZeroTier (giao thức là TCP thuần nên về lý thuyết chạy được; nhóm chưa kiểm thử thực tế)
+- [ ] Hỗ trợ kết nối qua Internet với ZeroTier (cần cấu hình TCP và UDP; nhóm chưa kiểm thử thực tế)
 - [x] Tự kết nối lại khi rớt mạng (giữ chỗ 20 s)
 - [ ] (Tùy chọn) Chuyển phần `STATE` sang UDP để tránh head-of-line blocking
 - [x] Lưu log game state ra file CSV (`logs/`)
