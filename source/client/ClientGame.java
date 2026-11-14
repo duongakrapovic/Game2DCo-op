@@ -31,12 +31,14 @@ public class ClientGame extends JPanel {
 
     private GameData.PlayerState localPlayer;
     private String myName = "Player";
+    private String myId = "";
     private Thread localGameThread;
     private volatile boolean isLocalRunning = false;
     private final Random rand = new Random();
     private boolean previousLocalAttack;
 
     public volatile boolean left = false, right = false, up = false, down = false, attack = false;
+    private volatile boolean attackTriggerPending = false;
     private ClientApp clientAppRef = null;
 
     private boolean showHud = true;
@@ -74,8 +76,23 @@ public class ClientGame extends JPanel {
         this.clientAppRef = app;
     }
 
+    public void setMyId(String id) {
+        this.myId = id == null ? "" : id;
+    }
+
+    public boolean isMe(GameData.PlayerState p) {
+        if (p == null) return false;
+        if (myId != null && !myId.isEmpty()) {
+            return myId.equals(p.id);
+        }
+        return p.name != null && p.name.equals(myName);
+    }
+
     private void triggerAttack(boolean isPressed) {
         this.attack = isPressed;
+        if (isPressed) {
+            this.attackTriggerPending = true;
+        }
         if (clientAppRef != null) {
             clientAppRef.sendAttackInput(isPressed);
         }
@@ -168,7 +185,9 @@ public class ClientGame extends JPanel {
                 localPlayer.down = down;
 
                 long wallNow = System.currentTimeMillis();
-                if (attack && !previousLocalAttack && !localPlayer.isAttacking) {
+                boolean attackReq = attackTriggerPending || (attack && !previousLocalAttack);
+                attackTriggerPending = false;
+                if (attackReq && !localPlayer.isAttacking) {
                     localPlayer.isAttacking = true;
                     localPlayer.attackTicks = 0;
                     Rectangle attackBox = GamePhysics.getAttackHitbox(
@@ -234,7 +253,14 @@ public class ClientGame extends JPanel {
     }
 
     public void updateOnlineWorld(String stateLine, String myCurrentName) {
+        updateOnlineWorld(stateLine, myCurrentName, null);
+    }
+
+    public void updateOnlineWorld(String stateLine, String myCurrentName, String myCurrentId) {
         this.myName = myCurrentName;
+        if (myCurrentId != null && !myCurrentId.isEmpty()) {
+            this.myId = myCurrentId;
+        }
         GameData.WorldSnapshot snapshot = GameProtocol.parseSnapshot(stateLine);
         long now = System.currentTimeMillis();
         Map<String, GameData.PlayerState> previousPlayers = renderPlayers;
@@ -247,7 +273,7 @@ public class ClientGame extends JPanel {
                 p.attackTicks = previous.isAttacking ? previous.attackTicks + 1 : 0;
             }
             updatedPlayers.put(p.id, p);
-            if (p.name.equals(myName)) {
+            if (isMe(p)) {
                 movement.onServerState(p.x, p.y, p.lastAckSeq);
             }
         }
@@ -295,7 +321,7 @@ public class ClientGame extends JPanel {
         int myMaxHp = 100;
 
         for (GameData.PlayerState p : playersSnapshot.values()) {
-            if (p.name.equals(myName)) {
+            if (isMe(p)) {
                 myX = (int) p.x;
                 myY = (int) p.y;
                 myHp = p.hp;
@@ -393,7 +419,7 @@ public class ClientGame extends JPanel {
                     g2.drawImage(currentSprite, screenX, screenY, entitySize, entitySize, null);
                 }
             } else {
-                g2.setColor(p.name.equals(myName) ? Color.CYAN : Color.BLUE);
+                g2.setColor(isMe(p) ? Color.CYAN : Color.BLUE);
                 g2.fillRect(screenX, screenY, entitySize, entitySize);
             }
 
@@ -409,7 +435,8 @@ public class ClientGame extends JPanel {
             g2.setColor(Color.RED);
             g2.fillRect(screenX, screenY - 5, entitySize, 4);
             g2.setColor(Color.CYAN);
-            g2.fillRect(screenX, screenY - 5, (int)(entitySize * ((float)p.hp / p.maxHp)), 4);
+            int barW = Math.max(0, Math.min(entitySize, (int)(entitySize * ((float)Math.max(0, p.hp) / Math.max(1, p.maxHp)))));
+            g2.fillRect(screenX, screenY - 5, barW, 4);
         }
 
         // 3. Hiển thị HUD cá nhân & Máu người chơi

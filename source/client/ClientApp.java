@@ -289,7 +289,12 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
                     resetInputState();
                     gamePanel.stopOfflineMode();
                     stopVoiceChat();
-                    if (netClient != null) netClient.close();
+                    if (netClient != null) {
+                        if (netClient.getState() == ClientNetwork.State.CONNECTED) {
+                            netClient.send(Common.CMD_LEAVE_ROOM);
+                        }
+                        netClient.close();
+                    }
                     cardLayout.show(mainContainer, "MENU");
                 }
             }
@@ -348,6 +353,10 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         gamePanel.up = false;
         gamePanel.down = false;
         sendAttackInput(false);
+        if (netClient != null && netClient.getState() == ClientNetwork.State.CONNECTED) {
+            ClientMovement.PredictionInput input = movement.step(false, false, false, false, false);
+            netClient.send("INPUT:false:false:false:false:" + input.seq + ":false");
+        }
     }
 
     private void updateKey(String dir, boolean pressed) {
@@ -380,7 +389,8 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         } else if ("LEFT".equals(line)) {
             SwingUtilities.invokeLater(this::stopVoiceChat);
         } else if (line.startsWith(Common.CMD_STATE)) {
-            gamePanel.updateOnlineWorld(line, myName);
+            String myId = netClient != null ? netClient.getMyId() : null;
+            gamePanel.updateOnlineWorld(line, myName, myId);
             updateHudDisplay();
         } else if (line.startsWith(Common.CMD_ERROR)) {
             pendingRoomCommand = null;

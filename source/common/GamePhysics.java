@@ -13,7 +13,7 @@ public class GamePhysics {
     public static final float MONSTER_SPEED = 1.5f;
     public static final int ENTITY_SIZE = (int) (16 * Common.SCALE);
     private static final int MAX_PATH_NODES = 512;
-    private static final int MONSTER_ATTACK_RANGE = 50;
+    private static final int MONSTER_ATTACK_RANGE = 42;
     private static final int MONSTER_CHASE_RANGE = 450;
     private static final int MONSTER_ATTACK_COOLDOWN_TICKS = 30;
 
@@ -392,7 +392,7 @@ public class GamePhysics {
     }
 
     public static Rectangle getAttackHitbox(float x, float y, String direction) {
-        int range = 24;
+        int range = 36;
         switch (direction) {
             case "up": return new Rectangle((int) x, (int) y - range, ENTITY_SIZE, range);
             case "down": return new Rectangle((int) x, (int) y + ENTITY_SIZE, ENTITY_SIZE, range);

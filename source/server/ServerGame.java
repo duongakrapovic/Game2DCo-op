@@ -25,6 +25,7 @@ public class ServerGame implements Runnable {
     private final Map<String, Integer> lastAcks = new ConcurrentHashMap<>();
     private final Map<String, Boolean> attackInputs = new ConcurrentHashMap<>();
     private final Map<String, Boolean> previousAttackInputs = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> pendingAttackTriggers = new ConcurrentHashMap<>();
 
     private final GameMap mapManager;
     private final Random random = new Random();
@@ -87,6 +88,7 @@ public class ServerGame implements Runnable {
         }
         attackInputs.put(playerId, false);
         previousAttackInputs.put(playerId, false);
+        pendingAttackTriggers.remove(playerId);
     }
 
     public void removePlayer(String playerId) {
@@ -95,6 +97,7 @@ public class ServerGame implements Runnable {
         lastAcks.remove(playerId);
         attackInputs.remove(playerId);
         previousAttackInputs.remove(playerId);
+        pendingAttackTriggers.remove(playerId);
     }
 
     public void updateAck(String playerId, int sequence) {
@@ -107,6 +110,9 @@ public class ServerGame implements Runnable {
     public void updateAttackInput(String playerId, boolean pressed) {
         if (players.containsKey(playerId)) {
             attackInputs.put(playerId, pressed);
+            if (pressed) {
+                pendingAttackTriggers.put(playerId, true);
+            }
         }
     }
 
@@ -149,7 +155,10 @@ public class ServerGame implements Runnable {
     private void updatePlayerAttack(GameData.PlayerState player) {
         boolean pressed = attackInputs.getOrDefault(player.id, false);
         boolean previouslyPressed = previousAttackInputs.getOrDefault(player.id, false);
-        if (pressed && !previouslyPressed && !player.isAttacking) {
+        boolean queuedTrigger = Boolean.TRUE.equals(pendingAttackTriggers.remove(player.id));
+        boolean shouldTrigger = (queuedTrigger || (pressed && !previouslyPressed)) && !player.isAttacking;
+
+        if (shouldTrigger) {
             player.isAttacking = true;
             player.attackTicks = 0;
             long now = System.currentTimeMillis();
