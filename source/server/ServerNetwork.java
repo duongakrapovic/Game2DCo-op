@@ -2,6 +2,7 @@ package source.server;
 
 import source.common.Common;
 import source.common.GameData;
+import source.common.GameUdp;
 import source.common.GameProtocol;
 
 import java.io.BufferedReader;
@@ -32,6 +33,7 @@ public class ServerNetwork {
     private final ConcurrentHashMap<SocketAddress, String> voicePlayersByAddress = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> voiceRoomsByPlayer = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ClientHandler> voiceHandlersByPlayer = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<SocketAddress, ServerSession> gameUdpPeers = new ConcurrentHashMap<>();
     private volatile ServerSocket serverSocket;
     private volatile DatagramSocket voiceSocket;
     private volatile boolean running;
@@ -70,7 +72,7 @@ public class ServerNetwork {
 
             acceptThread = new Thread(this::acceptConnections, "TCP-Acceptor");
             acceptThread.start();
-            voiceThread = new Thread(this::receiveVoicePackets, "UDP-Voice-Relay");
+            voiceThread = new Thread(this::receiveVoicePackets, "UDP-Relay");
             voiceThread.start();
         } catch (IOException e) {
             if (listener != null) {
@@ -135,6 +137,7 @@ public class ServerNetwork {
             voiceThread.interrupt();
             voiceThread = null;
         }
+        gameUdpPeers.clear();
         voicePlayersByAddress.clear();
         voicePeersByPlayer.clear();
         voiceRoomsByPlayer.clear();
@@ -149,6 +152,11 @@ public class ServerNetwork {
             DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
             try {
                 socket.receive(packet);
+                // Cùng một socket UDP phục vụ cả game (magic "GAM1") lẫn voice (magic "VCH1")
+                if (GameUdp.hasMagic(packet.getData(), packet.getOffset(), packet.getLength())) {
+                    handleGameUdp(packet);
+                    continue;
+                }
                 if (packet.getLength() < VOICE_HEADER_BYTES || !hasVoiceMagic(packet.getData())) {
                     continue;
                 }
@@ -166,6 +174,57 @@ public class ServerNetwork {
             } catch (IOException e) {
                 if (running) System.err.println("[ServerNetwork] Loi UDP voice: " + e.getMessage());
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ UDP game (INPUT / STATE)
+
+    private void handleGameUdp(DatagramPacket packet) {
+        byte[] data = packet.getData();
+        int off = packet.getOffset();
+        int len = packet.getLength();
+        byte type = GameUdp.type(data, off);
+        SocketAddress address = packet.getSocketAddress();
+
+        if (type == GameUdp.REGISTER) {
+            int tokenLength = len - GameUdp.HEADER;
+            if (tokenLength <= 0 || tokenLength > 128) return;
+            String token = new String(data, off + GameUdp.HEADER, tokenLength, StandardCharsets.UTF_8);
+            ServerSession session = app.getSessionByToken(token);
+            if (session == null || session.getClientHandler() == null) return;
+
+            SocketAddress previous = session.getUdpAddr();
+            if (previous != null && !previous.equals(address)) gameUdpPeers.remove(previous, session);
+            gameUdpPeers.put(address, session);
+            session.setUdpAddr(address);
+            sendUdp(GameUdp.registered(), address);
+        } else if (type == GameUdp.INPUT && len == GameUdp.HEADER + 5) {
+            // Chỉ nhận từ địa chỉ đã đăng ký bằng token (chống giả mạo người chơi khác)
+            ServerSession session = gameUdpPeers.get(address);
+            if (session == null) return;
+            ClientHandler handler = session.getClientHandler();
+            if (handler == null) return;
+            session.touchUdp();
+            int seq = GameUdp.getInt(data, off + GameUdp.HEADER);
+            int flags = data[off + GameUdp.HEADER + 4];
+            handler.applyUdpInput(seq, flags);
+        }
+    }
+
+    void forgetGameUdp(ServerSession session) {
+        SocketAddress address = session.getUdpAddr();
+        if (address != null) gameUdpPeers.remove(address, session);
+    }
+
+    boolean sendUdp(byte[] data, SocketAddress address) {
+        DatagramSocket socket = voiceSocket;
+        if (socket == null || socket.isClosed()) return false;
+        try {
+            socket.send(new DatagramPacket(data, data.length, address));
+            return true;
+        } catch (IOException e) {
+            if (running) System.err.println("[ServerNetwork] Loi gui UDP game: " + e.getMessage());
+            return false;
         }
     }
 
@@ -287,6 +346,23 @@ public class ServerNetwork {
                     close();
                 }
             }
+        }
+
+        /** Gửi một gói UDP game cho client này; false nếu UDP chưa sẵn sàng / gói quá lớn (khi đó dùng TCP). */
+        public boolean trySendUdp(byte[] packet) {
+            ServerSession active = session;
+            if (active == null || active.getClientHandler() != this || !active.isUdpAlive()) return false;
+            if (packet.length > GameUdp.MAX_PACKET) return false;
+            return sendUdp(packet, active.getUdpAddr());
+        }
+
+        void applyUdpInput(int seq, int flags) {
+            ServerGame room = currentRoom;
+            if (room == null) return;
+            room.applyInput(playerId,
+                    (flags & GameUdp.FLAG_LEFT) != 0, (flags & GameUdp.FLAG_RIGHT) != 0,
+                    (flags & GameUdp.FLAG_UP) != 0, (flags & GameUdp.FLAG_DOWN) != 0,
+                    (flags & GameUdp.FLAG_ATTACK) != 0, seq, true);
         }
 
         public void close() {
@@ -463,21 +539,10 @@ public class ServerNetwork {
                 attackPressed = Boolean.parseBoolean(parts[6]);
             }
 
-            GameData.PlayerState player = currentRoom.getPlayers().get(playerId);
-            if (player == null) {
-                return;
-            }
-            player.left = Boolean.parseBoolean(parts[1]);
-            player.right = Boolean.parseBoolean(parts[2]);
-            player.up = Boolean.parseBoolean(parts[3]);
-            player.down = Boolean.parseBoolean(parts[4]);
-
-            if (sequence != null) {
-                currentRoom.updateAck(playerId, sequence);
-            }
-            if (attackPressed != null) {
-                currentRoom.updateAttackInput(playerId, attackPressed);
-            }
+            currentRoom.applyTcpInput(playerId,
+                    Boolean.parseBoolean(parts[1]), Boolean.parseBoolean(parts[2]),
+                    Boolean.parseBoolean(parts[3]), Boolean.parseBoolean(parts[4]),
+                    attackPressed, sequence);
         }
 
         private boolean isBoolean(String value) {

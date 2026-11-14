@@ -30,14 +30,14 @@ public class GameProtocol {
 
     public static String sanitizeName(String name) {
         if (name == null) return "Player";
-        String clean = name.replaceAll("[;,:|\\s]", "").trim();
+        String clean = name.replaceAll("[;,:|#\\s]", "").trim();
         if (clean.isEmpty()) return "Player";
         return clean.length() > 16 ? clean.substring(0, 16) : clean;
     }
 
     public static String sanitizeRoom(String room) {
         if (room == null) return "Room1";
-        String clean = room.replaceAll("\\s+", "_").replaceAll("[;,:|]", "").trim();
+        String clean = room.replaceAll("\\s+", "_").replaceAll("[;,:|#]", "").trim();
         if (clean.isEmpty()) return "Room1";
         return clean.length() > 20 ? clean.substring(0, 20) : clean;
     }
@@ -48,11 +48,17 @@ public class GameProtocol {
 
     // Đóng gói Snapshot từ Server thành Chuỗi Message
     public static String serializeSnapshot(GameData.WorldSnapshot snapshot) {
+        return serializeSnapshot(snapshot, true, true);
+    }
+
+    // Chỉ đóng gói phần được chọn (UDP gửi người chơi mỗi tick, quái thưa hơn)
+    public static String serializeSnapshot(GameData.WorldSnapshot snapshot,
+                                           boolean includePlayers, boolean includeMonsters) {
         StringBuilder sb = new StringBuilder(Common.CMD_STATE);
 
         // Khối Player
-        sb.append("#PLAYERS:");
-        for (GameData.PlayerState p : snapshot.players) {
+        if (includePlayers) sb.append("#PLAYERS:");
+        for (GameData.PlayerState p : includePlayers ? snapshot.players : java.util.Collections.<GameData.PlayerState>emptyList()) {
             sb.append(p.id).append(",")
               .append(p.name).append(",")
               .append(fmt2(p.x)).append(",")
@@ -66,8 +72,8 @@ public class GameProtocol {
         }
 
         // Khối Quái vật
-        sb.append("#MONSTERS:");
-        for (GameData.MonsterState m : snapshot.monsters) {
+        if (includeMonsters) sb.append("#MONSTERS:");
+        for (GameData.MonsterState m : includeMonsters ? snapshot.monsters : java.util.Collections.<GameData.MonsterState>emptyList()) {
             sb.append(m.id).append(",")
               .append(m.type).append(",")
               .append(fmt2(m.x)).append(",")
@@ -90,6 +96,7 @@ public class GameProtocol {
         String[] sections = line.split("#");
         for (String sec : sections) {
             if (sec.startsWith("PLAYERS:")) {
+                snapshot.hasPlayers = true;
                 String raw = sec.substring(8);
                 String[] items = raw.split(";");
                 for (String item : items) {
@@ -111,6 +118,7 @@ public class GameProtocol {
                     }
                 }
             } else if (sec.startsWith("MONSTERS:")) {
+                snapshot.hasMonsters = true;
                 String raw = sec.substring(9);
                 String[] items = raw.split(";");
                 for (String item : items) {

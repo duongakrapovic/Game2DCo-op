@@ -107,6 +107,8 @@ public class GameData {
 
     public static class WorldSnapshot {
         public long timestamp;
+        public boolean hasPlayers = false;   // gói UDP có thể chỉ chứa một trong hai phần
+        public boolean hasMonsters = false;
         public List<PlayerState> players = new ArrayList<>();
         public List<MonsterState> monsters = new ArrayList<>();
 

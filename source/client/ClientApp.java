@@ -16,6 +16,12 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
     private ClientNetwork netClient;
     private ClientVoiceChat voiceChat;
+    private volatile ClientGameUdp gameUdp;                       // kênh UDP cho INPUT/STATE
+    private Thread onlineTickThread;
+    private volatile boolean onlineTickRunning = false;
+    private final java.util.concurrent.atomic.AtomicInteger attackLatch = new java.util.concurrent.atomic.AtomicInteger();
+    private String lastTcpInputSignature = null;
+    private volatile boolean inputViaUdp = false;
     private final ClientMovement movement;
 
     private final CardLayout cardLayout = new CardLayout();
@@ -59,7 +65,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             @Override
             public void windowClosing(WindowEvent e) {
                 gamePanel.stopOfflineMode();
-                stopVoiceChat();
+                stopOnlineServices();
                 if (netClient != null) netClient.close();
             }
         });
@@ -89,7 +95,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
         btnOffline.addActionListener(e -> {
             gamePanel.stopOfflineMode();
-            stopVoiceChat();
+            stopOnlineServices();
             if (netClient != null) netClient.close();
             setTitle("Dungeon Co-op [OFFLINE]");
             gamePanel.startOfflineMode(myName);
@@ -120,7 +126,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         topBar.setOpaque(false);
         JButton btnBack = new JButton("Quay lại Menu");
         btnBack.addActionListener(e -> {
-            stopVoiceChat();
+            stopOnlineServices();
             if (netClient != null) netClient.close();
             cardLayout.show(mainContainer, "MENU");
         });
@@ -184,7 +190,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
     private void connectToServer() {
         String ip = txtServerIp.getText().trim();
-        stopVoiceChat();
+        stopOnlineServices();
         if (netClient != null) netClient.close();
         netClient = new ClientNetwork(ip, Common.TCP_PORT, this);
         netClient.connect();
@@ -280,7 +286,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             @Override public void actionPerformed(ActionEvent e) {
                 if (JOptionPane.showConfirmDialog(ClientApp.this, "Về Menu chính?", "Thoát", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
                     gamePanel.stopOfflineMode();
-                    stopVoiceChat();
+                    stopOnlineServices();
                     if (netClient != null) netClient.close();
                     cardLayout.show(mainContainer, "MENU");
                 }
@@ -328,10 +334,8 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
     public void sendAttackInput(boolean pressed) {
         gamePanel.attack = pressed;
-        if (netClient != null && netClient.getState() == ClientNetwork.State.CONNECTED) {
-            ClientMovement.PredictionInput input = movement.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down, pressed);
-            netClient.send("INPUT:" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.seq + ":" + input.attack);
-        }
+        // Cú bấm ngắn hơn một tick vẫn phải được gửi đi ít nhất 3 tick liên tiếp (chống mất gói UDP / bỏ lỡ cú đánh)
+        if (pressed) attackLatch.set(3);
     }
 
     private void updateKey(String dir, boolean pressed) {
@@ -342,10 +346,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             case "down": gamePanel.down = pressed; break;
         }
 
-        if (netClient != null && netClient.getState() == ClientNetwork.State.CONNECTED) {
-            ClientMovement.PredictionInput input = movement.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down, gamePanel.attack);
-            netClient.send("INPUT:" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.seq + ":" + input.attack);
-        }
+        // Việc gửi INPUT do vòng lặp onlineTickLoop (60 lần/giây) đảm nhiệm
     }
 
     @Override
@@ -358,11 +359,11 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             });
         } else if (line.startsWith(Common.CMD_JOINED + ":")) {
             SwingUtilities.invokeLater(this::switchToGameScene);
-            SwingUtilities.invokeLater(this::startVoiceChat);
+            SwingUtilities.invokeLater(() -> startOnlineServices(true));
         } else if (line.startsWith("RESUMED:")) {
-            SwingUtilities.invokeLater(this::startVoiceChat);
+            SwingUtilities.invokeLater(() -> startOnlineServices(false));
         } else if ("LEFT".equals(line)) {
-            SwingUtilities.invokeLater(this::stopVoiceChat);
+            SwingUtilities.invokeLater(this::stopOnlineServices);
         } else if (line.startsWith(Common.CMD_STATE)) {
             gamePanel.updateOnlineWorld(line, myName);
             updateHudDisplay();
@@ -376,13 +377,128 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
     private void updateHudDisplay() {
         if (netClient == null) return;
-        String l1 = String.format("PING %.0f ms (jitter %.1f)   STATE 60/s   down 4.1 KB/s   up 2.0 KB/s",
-                netClient.getRttMs(), netClient.getJitterMs());
+        String l1 = String.format("PING %.0f ms (jitter %.1f)   INPUT/STATE qua: %s",
+                netClient.getRttMs(), netClient.getJitterMs(), inputViaUdp ? "UDP" : "TCP");
         String l2 = String.format("Dự đoán [F6]: %s   Nội suy [F7]: %s (%d ms)   Lag giả lập [F4]: %d ms",
                 movement.isPredictionEnabled() ? "BẬT" : "TẮT", movement.isInterpolationEnabled() ? "BẬT" : "TẮT", movement.getInterpolationDelayMs(), netClient.getLagMs());
         String l3 = String.format("Sai số reconcile: %.2f px   Pending: %d   Hiệu chỉnh: %d   Reconnect: %d",
                 movement.maxError(), movement.pendingCount(), movement.correctionCount(), netClient.getReconnectCount());
         gamePanel.setHudInfo(l1, l2, l3);
+    }
+
+    // ------------------------------------------------------------------ dịch vụ online: tick 60Hz + UDP + voice
+
+    /** Gọi khi JOINED (vào phòng mới) hoặc RESUMED (kết nối lại sau khi rớt mạng). */
+    private void startOnlineServices(boolean freshJoin) {
+        ClientNetwork client = netClient;
+        if (client == null) return;
+        if (freshJoin) {
+            // Id người chơi trong phòng. Sau kết nối lại WELCOME cấp id tạm mới nên chỉ lấy lúc vào phòng.
+            gamePanel.setMyPlayerId(client.getMyId());
+            gamePanel.clearOnlineWorld();
+            lastTcpInputSignature = null;
+        }
+        startGameUdp();
+        startOnlineTick();
+        startVoiceChat();
+    }
+
+    private void stopOnlineServices() {
+        stopOnlineTick();
+        stopGameUdp();
+        stopVoiceChat();
+    }
+
+    private void startGameUdp() {
+        ClientNetwork client = netClient;
+        if (client == null || client.getSessionToken() == null || gameUdp != null) return;
+        try {
+            gameUdp = new ClientGameUdp(txtServerIp.getText().trim(), Common.TCP_PORT,
+                    client.getSessionToken(),
+                    text -> gamePanel.updateOnlineWorld(text, myName));
+        } catch (java.io.IOException e) {
+            System.err.println("[ClientApp] Khong mo duoc UDP game, dung TCP: " + e.getMessage());
+        }
+    }
+
+    private void stopGameUdp() {
+        ClientGameUdp current = gameUdp;
+        gameUdp = null;
+        if (current != null) current.close();
+        inputViaUdp = false;
+    }
+
+    private void startOnlineTick() {
+        if (onlineTickRunning) return;
+        onlineTickRunning = true;
+        onlineTickThread = new Thread(this::onlineTickLoop, "Online-Tick");
+        onlineTickThread.setDaemon(true);
+        onlineTickThread.start();
+    }
+
+    private void stopOnlineTick() {
+        onlineTickRunning = false;
+        Thread t = onlineTickThread;
+        onlineTickThread = null;
+        if (t != null) t.interrupt();
+    }
+
+    /** Vòng lặp 60Hz: dự đoán + gửi input + dựng khung hình (nội suy). */
+    private void onlineTickLoop() {
+        long next = System.nanoTime();
+        int n = 0;
+        while (onlineTickRunning && Thread.currentThread() == onlineTickThread) {
+            try {
+                onlineTick(n++);
+            } catch (RuntimeException e) {
+                System.err.println("[ClientApp] Loi tick online: " + e);
+            }
+            next += Common.TICK_NS;
+            long sleepNs = next - System.nanoTime();
+            if (sleepNs > 0) {
+                try {
+                    Thread.sleep(sleepNs / 1_000_000L, (int) (sleepNs % 1_000_000L));
+                } catch (InterruptedException e) {
+                    if (!onlineTickRunning) break;
+                }
+            } else if (sleepNs < -200_000_000L) {
+                next = System.nanoTime();
+            }
+        }
+    }
+
+    private void onlineTick(int n) {
+        ClientNetwork client = netClient;
+        if (client != null && client.getState() == ClientNetwork.State.CONNECTED) {
+            boolean attack = gamePanel.attack;
+            if (attackLatch.get() > 0) {
+                attack = true;
+                attackLatch.decrementAndGet();
+            }
+            ClientMovement.PredictionInput in = movement.step(
+                    gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down, attack);
+            sendInput(client, in, n);
+        }
+        gamePanel.renderOnlineFrame();
+        if (n % 6 == 0) updateHudDisplay();
+    }
+
+    private void sendInput(ClientNetwork client, ClientMovement.PredictionInput in, int n) {
+        ClientGameUdp udp = gameUdp;
+        if (udp != null && udp.isReady()) {
+            // UDP: mỗi tick một gói; gói mất thì gói sau thay thế, nên không cần gửi lại
+            udp.sendInput(in.seq, in.left, in.right, in.up, in.down, in.attack);
+            inputViaUdp = true;
+            lastTcpInputSignature = null;
+            return;
+        }
+        // Dự phòng TCP (UDP chưa đăng ký được / bị chặn): TCP đủ tin cậy nên chỉ gửi khi đổi trạng thái + nhắc định kỳ
+        inputViaUdp = false;
+        String signature = in.left + ":" + in.right + ":" + in.up + ":" + in.down + ":" + in.attack;
+        if (!signature.equals(lastTcpInputSignature) || n % 15 == 0) {
+            lastTcpInputSignature = signature;
+            client.send("INPUT:" + in.left + ":" + in.right + ":" + in.up + ":" + in.down + ":" + in.seq + ":" + in.attack);
+        }
     }
 
     private void startVoiceChat() {
@@ -424,7 +540,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     @Override
     public void onSessionLost(String reason) {
         pendingRoomCommand = null;
-        SwingUtilities.invokeLater(this::stopVoiceChat);
+        SwingUtilities.invokeLater(this::stopOnlineServices);
         SwingUtilities.invokeLater(() -> cardLayout.show(mainContainer, "MENU"));
     }
 

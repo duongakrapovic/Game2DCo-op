@@ -1,5 +1,6 @@
 package source.client;
 
+import source.common.Common;
 import source.common.GameData;
 import source.common.GameMap;
 import source.common.GamePhysics;
@@ -31,10 +32,14 @@ public class ClientMovement {
         }
     }
 
+    /** Khoảng cách giữa hai snapshot liên tiếp lớn hơn mức này coi là dịch chuyển tức thời (hồi sinh...): không nội suy. */
+    private static final float TELEPORT_DISTANCE = 160f;
+    private static final int MAX_PENDING_INPUTS = 180;
+
     private final GameData.PlayerState localPlayer;
     private final GameMap mapManager;
     private final Queue<PredictionInput> pendingInputs = new LinkedList<>();
-    private final Map<String, List<Snap>> playerSnaps = new ConcurrentHashMap<>();
+    private final Map<String, List<Snap>> snaps = new ConcurrentHashMap<>(); // người chơi (P..) và quái (M..) có id khác nhau
 
     private int nextSeq = 0;
     private float maxErrorObserved = 0;
@@ -42,91 +47,133 @@ public class ClientMovement {
 
     private boolean predictionEnabled = true;
     private boolean interpolationEnabled = true;
-    private long interpolationDelayMs = 100;
+    private long interpolationDelayMs = 100; // vẽ thế giới chậm 100 ms để luôn có 2 snapshot để nội suy (quái cập nhật 20 lần/giây)
 
     public ClientMovement(GameMap mapManager) {
         this.mapManager = mapManager;
         this.localPlayer = new GameData.PlayerState("local", "Me");
     }
 
+    /** Gọi khi vào phòng mới: xóa toàn bộ trạng thái dự đoán và nội suy cũ. */
+    public synchronized void reset() {
+        pendingInputs.clear();
+        snaps.clear();
+        nextSeq = 0;
+        localPlayer.x = Common.SPAWN_X;
+        localPlayer.y = Common.SPAWN_Y;
+        localPlayer.direction = "down";
+        localPlayer.spriteNum = 1;
+        localPlayer.animCounter = 0;
+    }
+
+    /**
+     * Một tick (60 lần/giây) của người chơi cục bộ: chạy vật lý ngay trên máy mình (dự đoán) để điều khiển
+     * không bị trễ theo độ trễ mạng, đồng thời lưu input chờ server xác nhận (ack) để sửa lại nếu lệch.
+     */
     public synchronized PredictionInput step(boolean l, boolean r, boolean u, boolean d, boolean atk) {
         PredictionInput input = new PredictionInput(nextSeq++, l, r, u, d, atk);
         if (predictionEnabled) {
             pendingInputs.add(input);
-            localPlayer.left = l;
-            localPlayer.right = r;
-            localPlayer.up = u;
-            localPlayer.down = d;
-            localPlayer.isAttacking = atk;
-            GamePhysics.updatePlayer(localPlayer, mapManager);
+            while (pendingInputs.size() > MAX_PENDING_INPUTS) pendingInputs.poll();
+            applyToLocal(input);
         }
         return input;
     }
 
+    private void applyToLocal(PredictionInput in) {
+        localPlayer.left = in.left;
+        localPlayer.right = in.right;
+        localPlayer.up = in.up;
+        localPlayer.down = in.down;
+        GamePhysics.updatePlayer(localPlayer, mapManager);
+    }
+
+    /**
+     * Reconciliation: lấy vị trí server (đã xử lý tới input lastAckSeq), phát lại các input chưa được xác nhận,
+     * rồi so với vị trí đã dự đoán. Thường trùng khớp; chỉ lệch khi bị đẩy lùi, hồi sinh, va chạm khác...
+     */
     public synchronized void onServerState(float serverX, float serverY, int lastAckSeq) {
+        if (!predictionEnabled) {
+            localPlayer.x = serverX;
+            localPlayer.y = serverY;
+            return;
+        }
         while (!pendingInputs.isEmpty() && pendingInputs.peek().seq <= lastAckSeq) {
             pendingInputs.poll();
         }
 
-        float err = (float) Math.hypot(localPlayer.x - serverX, localPlayer.y - serverY);
-        if (err > maxErrorObserved) maxErrorObserved = err;
-
-        if (err > 1.5f) {
-            correctionCount++;
-            localPlayer.x = serverX;
-            localPlayer.y = serverY;
-
-            for (PredictionInput in : pendingInputs) {
-                localPlayer.left = in.left;
-                localPlayer.right = in.right;
-                localPlayer.up = in.up;
-                localPlayer.down = in.down;
-                localPlayer.isAttacking = in.attack;
-                GamePhysics.updatePlayer(localPlayer, mapManager);
-            }
+        float predictedX = localPlayer.x, predictedY = localPlayer.y;
+        localPlayer.x = serverX;
+        localPlayer.y = serverY;
+        for (PredictionInput in : pendingInputs) {
+            applyToLocal(in);
         }
+
+        float err = (float) Math.hypot(localPlayer.x - predictedX, localPlayer.y - predictedY);
+        if (err > maxErrorObserved) maxErrorObserved = err;
+        if (err > 1.5f) correctionCount++;
     }
 
+    /** Lưu một snapshot (người chơi hoặc quái) kèm thời điểm nhận để nội suy. */
     public void addSnap(String id, float x, float y, String dir, int sprite) {
         long now = System.currentTimeMillis();
-        List<Snap> list = playerSnaps.computeIfAbsent(id, k -> new ArrayList<>());
-        list.add(new Snap(now, x, y, dir, sprite));
-        if (list.size() > 30) list.remove(0);
+        List<Snap> list = snaps.computeIfAbsent(id, k -> new ArrayList<>());
+        synchronized (list) {
+            list.add(new Snap(now, x, y, dir, sprite));
+            if (list.size() > 40) list.remove(0);
+        }
     }
 
-    public synchronized Snap getInterpolatedState(String id) {
-        List<Snap> list = playerSnaps.get(id);
-        if (list == null || list.isEmpty()) return null;
+    /** Bỏ dữ liệu của những thực thể không còn trong thế giới. */
+    public void retainSnaps(java.util.Set<String> ids) {
+        snaps.keySet().retainAll(ids);
+    }
 
-        if (!interpolationEnabled) {
-            return list.get(list.size() - 1);
-        }
+    /**
+     * Vị trí vẽ của một thực thể tại thời điểm (bây giờ - độ trễ nội suy): nội suy tuyến tính giữa hai snapshot
+     * bao quanh mốc đó. Chưa đủ dữ liệu thì giữ vị trí gần nhất; không ngoại suy.
+     */
+    public Snap getInterpolatedState(String id) {
+        List<Snap> list = snaps.get(id);
+        if (list == null) return null;
+        synchronized (list) {
+            if (list.isEmpty()) return null;
+            Snap newest = list.get(list.size() - 1);
+            if (!interpolationEnabled) return newest;
 
-        long renderTime = System.currentTimeMillis() - interpolationDelayMs;
+            long renderTime = System.currentTimeMillis() - interpolationDelayMs;
+            if (renderTime >= newest.timestamp) return newest;
+            Snap oldest = list.get(0);
+            if (renderTime <= oldest.timestamp) return oldest;
 
-        for (int i = list.size() - 1; i >= 0; i--) {
-            Snap s2 = list.get(i);
-            if (s2.timestamp <= renderTime && i + 1 < list.size()) {
-                Snap s1 = list.get(i + 1);
-                long diff = s1.timestamp - s2.timestamp;
-                if (diff <= 0) return s2;
-
-                float factor = (float) (renderTime - s2.timestamp) / diff;
-                factor = Math.max(0f, Math.min(1f, factor));
-
-                float rx = s2.x + (s1.x - s2.x) * factor;
-                float ry = s2.y + (s1.y - s2.y) * factor;
-                return new Snap(renderTime, rx, ry, s1.direction, s1.spriteNum);
+            for (int i = list.size() - 1; i > 0; i--) {
+                Snap before = list.get(i - 1);
+                Snap after = list.get(i);
+                if (before.timestamp <= renderTime && renderTime <= after.timestamp) {
+                    if (Math.hypot(after.x - before.x, after.y - before.y) > TELEPORT_DISTANCE) {
+                        return renderTime - before.timestamp < after.timestamp - renderTime ? before : after;
+                    }
+                    long span = after.timestamp - before.timestamp;
+                    float f = span <= 0 ? 1f : (float) (renderTime - before.timestamp) / span;
+                    f = Math.max(0f, Math.min(1f, f));
+                    return new Snap(renderTime,
+                            before.x + (after.x - before.x) * f,
+                            before.y + (after.y - before.y) * f,
+                            f < 0.5f ? before.direction : after.direction,
+                            f < 0.5f ? before.spriteNum : after.spriteNum);
+                }
             }
+            return newest;
         }
-        return list.get(list.size() - 1);
     }
 
-    public float x() { return localPlayer.x; }
-    public float y() { return localPlayer.y; }
-    public int pendingCount() { return pendingInputs.size(); }
-    public float maxError() { return maxErrorObserved; }
-    public int correctionCount() { return correctionCount; }
+    public synchronized float x() { return localPlayer.x; }
+    public synchronized float y() { return localPlayer.y; }
+    public synchronized String direction() { return localPlayer.direction; }
+    public synchronized int spriteNum() { return localPlayer.spriteNum; }
+    public synchronized int pendingCount() { return pendingInputs.size(); }
+    public synchronized float maxError() { return maxErrorObserved; }
+    public synchronized int correctionCount() { return correctionCount; }
     public boolean isPredictionEnabled() { return predictionEnabled; }
     public void setPredictionEnabled(boolean enabled) { this.predictionEnabled = enabled; }
     public boolean isInterpolationEnabled() { return interpolationEnabled; }

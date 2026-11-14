@@ -75,6 +75,19 @@ game play 2.5D , khám phá bản đồ .
     - Phím ESC trong Game hiện hộp thoại xác nhận quay về Menu
     - Hỗ trợ CLI flag: java -cp . source.client.ClientApp --offline
 ----------------------------------------------------------------------------------------
+14/11
+[1] Chuyển INPUT và STATE sang UDP (cùng cổng 8888 với TCP và voice, magic "GAM1")
+    - common/GameUdp.java (mới): định dạng gói REGISTER/REGISTERED/INPUT/STATE_PLAYERS/STATE_MONSTERS
+    - server/ServerNetwork: nhận REGISTER/INPUT qua cùng socket với voice; trySendUdp cho từng client
+    - server/ServerGame: applyInput dùng chung TCP/UDP, bỏ input cũ theo seq, tự nhả phím sau 300 ms không có input,
+      gửi STATE người chơi mỗi tick + quái mỗi 3 tick qua UDP, dự phòng TCP nếu UDP chưa sẵn sàng hoặc gói > 1200 byte
+    - client/ClientGameUdp (mới): đăng ký token, nhận STATE (bỏ gói tick cũ)
+[2] Client vẽ bằng dự đoán + nội suy (trước đây vẽ thẳng snapshot mới nhất)
+    - ClientApp: vòng lặp 60Hz (dự đoán -> gửi INPUT UDP/TCP -> dựng khung hình)
+    - ClientMovement: reconcile mỗi snapshot (rewind + replay), nội suy 100 ms cho người chơi và quái
+    - ClientGame: updateOnlineWorld chỉ cất dữ liệu, renderOnlineFrame dựng khung hình
+[3] GameProtocol: tên/phòng không được chứa '#' (ký tự phân cách khối của STATE)
+
 4/11
 [1] Sửa lỗi va chạm vùng tọa độ âm source/common/MapManager.java
 isCollisionAtWorld(int worldX, int worldY)
