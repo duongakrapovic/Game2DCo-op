@@ -46,6 +46,48 @@ public class GameProtocol {
         return Float.toString(Math.round(v * 100f) / 100f);
     }
 
+    public static final int UDP_HEADER_BYTES = 5;
+
+    public static byte[] createGameUdpPacket(byte type, String payload) {
+        byte[] payloadBytes = payload == null ? new byte[0] : payload.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] packet = new byte[UDP_HEADER_BYTES + payloadBytes.length];
+        System.arraycopy(Common.UDP_MAGIC_GAME_BYTES, 0, packet, 0, 4);
+        packet[4] = type;
+        if (payloadBytes.length > 0) {
+            System.arraycopy(payloadBytes, 0, packet, UDP_HEADER_BYTES, payloadBytes.length);
+        }
+        return packet;
+    }
+
+    public static byte[] createGameUdpPacket(byte type, byte[] payloadBytes) {
+        if (payloadBytes == null) payloadBytes = new byte[0];
+        byte[] packet = new byte[UDP_HEADER_BYTES + payloadBytes.length];
+        System.arraycopy(Common.UDP_MAGIC_GAME_BYTES, 0, packet, 0, 4);
+        packet[4] = type;
+        if (payloadBytes.length > 0) {
+            System.arraycopy(payloadBytes, 0, packet, UDP_HEADER_BYTES, payloadBytes.length);
+        }
+        return packet;
+    }
+
+    public static boolean isGameUdpPacket(byte[] data, int length) {
+        if (data == null || length < UDP_HEADER_BYTES) return false;
+        return data[0] == Common.UDP_MAGIC_GAME_BYTES[0]
+            && data[1] == Common.UDP_MAGIC_GAME_BYTES[1]
+            && data[2] == Common.UDP_MAGIC_GAME_BYTES[2]
+            && data[3] == Common.UDP_MAGIC_GAME_BYTES[3];
+    }
+
+    public static byte getGameUdpType(byte[] data) {
+        return data[4];
+    }
+
+    public static String getGameUdpPayload(byte[] data, int offset, int length) {
+        int payloadLen = length - UDP_HEADER_BYTES;
+        if (payloadLen <= 0) return "";
+        return new String(data, offset + UDP_HEADER_BYTES, payloadLen, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
     // Đóng gói Snapshot từ Server thành Chuỗi Message
     public static String serializeSnapshot(GameData.WorldSnapshot snapshot) {
         StringBuilder sb = new StringBuilder(Common.CMD_STATE);
@@ -62,7 +104,8 @@ public class GameProtocol {
               .append(p.hp).append(",")
               .append(p.maxHp).append(",")
               .append(p.isAttacking ? "1" : "0").append(",")
-              .append(p.lastAckSeq).append(";");
+              .append(p.lastAckSeq).append(",")
+              .append(p.pingMs).append(";");
         }
 
         // Khối Quái vật
@@ -107,6 +150,7 @@ public class GameProtocol {
                         p.maxHp = Integer.parseInt(pData[7]);
                         p.isAttacking = "1".equals(pData[8]);
                         p.lastAckSeq = Integer.parseInt(pData[9]);
+                        p.pingMs = pData.length >= 11 ? Integer.parseInt(pData[10]) : 0;
                         snapshot.players.add(p);
                     }
                 }

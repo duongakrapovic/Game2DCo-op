@@ -5,6 +5,7 @@ import source.common.GameData;
 import source.common.GameMap;
 import source.common.GamePhysics;
 import source.common.GameProtocol;
+import source.common.SaveManager;
 
 import java.awt.Point;
 import java.awt.Rectangle;
@@ -19,6 +20,7 @@ public class ServerGame implements Runnable {
     private static final int RESPAWN_MAX_TICKS = 300;
 
     private final String roomId;
+    private final ServerNetwork serverNetwork;
     private final Map<String, GameData.PlayerState> players = new ConcurrentHashMap<>();
     private final Map<String, GameData.MonsterState> monsters = new ConcurrentHashMap<>();
     private final Map<String, ServerNetwork.ClientHandler> clientHandlers = new ConcurrentHashMap<>();
@@ -30,9 +32,19 @@ public class ServerGame implements Runnable {
     private final Random random = new Random();
     private volatile boolean running = true;
     private final Thread loopThread;
+    private SaveManager.OnlineSaveData saveData;
+    private long stateSequence = 0;
+    private int saveTickCounter = 0;
 
     public ServerGame(String roomId) {
+        this(roomId, null);
+    }
+
+    public ServerGame(String roomId, ServerNetwork serverNetwork) {
         this.roomId = roomId;
+        this.serverNetwork = serverNetwork;
+        this.saveData = SaveManager.loadOrCreateOnlineSave(roomId);
+
         this.mapManager = new GameMap();
         String mapPath = "source/content/map";
         mapManager.initTileset(256);
@@ -60,6 +72,47 @@ public class ServerGame implements Runnable {
             return false;
         }
 
+        if (saveData != null) {
+            SaveManager.PlayerSlotData matchedSlot = null;
+            for (SaveManager.PlayerSlotData slot : saveData.slots) {
+                if (slot.playerName != null && slot.playerName.equalsIgnoreCase(player.name)) {
+                    matchedSlot = slot;
+                    break;
+                }
+            }
+
+            if (matchedSlot != null) {
+                matchedSlot.status = "ACTIVE";
+                if (matchedSlot.x > 0 || matchedSlot.y > 0) {
+                    player.x = matchedSlot.x;
+                    player.y = matchedSlot.y;
+                }
+                if (matchedSlot.hp > 0) {
+                    player.hp = matchedSlot.hp;
+                    player.maxHp = matchedSlot.maxHp;
+                }
+                SaveManager.saveOnline(saveData);
+            } else {
+                SaveManager.PlayerSlotData emptySlot = null;
+                for (SaveManager.PlayerSlotData slot : saveData.slots) {
+                    if ("EMPTY".equals(slot.status)) {
+                        emptySlot = slot;
+                        break;
+                    }
+                }
+                if (emptySlot == null) {
+                    return false;
+                }
+                emptySlot.status = "ACTIVE";
+                emptySlot.playerName = player.name;
+                emptySlot.x = player.x;
+                emptySlot.y = player.y;
+                emptySlot.hp = player.hp;
+                emptySlot.maxHp = player.maxHp;
+                SaveManager.saveOnline(saveData);
+            }
+        }
+
         players.put(player.id, player);
         lastAcks.put(player.id, -1);
         attackInputs.put(player.id, false);
@@ -76,7 +129,7 @@ public class ServerGame implements Runnable {
         }
     }
 
-    public void detachPlayerHandler(String playerId, ServerNetwork.ClientHandler handler) {
+    public synchronized void detachPlayerHandler(String playerId, ServerNetwork.ClientHandler handler) {
         clientHandlers.remove(playerId, handler);
         GameData.PlayerState player = players.get(playerId);
         if (player != null) {
@@ -84,17 +137,43 @@ public class ServerGame implements Runnable {
             player.right = false;
             player.up = false;
             player.down = false;
+            if (saveData != null) {
+                for (SaveManager.PlayerSlotData slot : saveData.slots) {
+                    if (slot.playerName != null && slot.playerName.equalsIgnoreCase(player.name)) {
+                        slot.x = player.x;
+                        slot.y = player.y;
+                        slot.hp = player.hp;
+                        slot.maxHp = player.maxHp;
+                        slot.status = "DISCONNECTED";
+                        break;
+                    }
+                }
+                SaveManager.saveOnline(saveData);
+            }
         }
         attackInputs.put(playerId, false);
         previousAttackInputs.put(playerId, false);
     }
 
-    public void removePlayer(String playerId) {
-        players.remove(playerId);
+    public synchronized void removePlayer(String playerId) {
+        GameData.PlayerState player = players.remove(playerId);
         clientHandlers.remove(playerId);
         lastAcks.remove(playerId);
         attackInputs.remove(playerId);
         previousAttackInputs.remove(playerId);
+        if (player != null && saveData != null) {
+            for (SaveManager.PlayerSlotData slot : saveData.slots) {
+                if (slot.playerName != null && slot.playerName.equalsIgnoreCase(player.name)) {
+                    slot.x = player.x;
+                    slot.y = player.y;
+                    slot.hp = player.hp;
+                    slot.maxHp = player.maxHp;
+                    slot.status = "DISCONNECTED";
+                    break;
+                }
+            }
+            SaveManager.saveOnline(saveData);
+        }
     }
 
     public void updateAck(String playerId, int sequence) {
@@ -113,6 +192,7 @@ public class ServerGame implements Runnable {
     public void stop() {
         running = false;
         loopThread.interrupt();
+        syncAndSaveOnline();
     }
 
     @Override
@@ -128,7 +208,12 @@ public class ServerGame implements Runnable {
             }
 
             updateMonsters();
-            broadcastTcpState();
+            broadcastUdpState();
+
+            if (++saveTickCounter >= 900) {
+                saveTickCounter = 0;
+                syncAndSaveOnline();
+            }
 
             nextTick += Common.TICK_NS;
             long sleepNs = nextTick - System.nanoTime();
@@ -263,8 +348,8 @@ public class ServerGame implements Runnable {
                 + random.nextInt(RESPAWN_MAX_TICKS - RESPAWN_MIN_TICKS + 1);
     }
 
-    private void broadcastTcpState() {
-        if (players.isEmpty()) {
+    private void broadcastUdpState() {
+        if (players.isEmpty() || serverNetwork == null) {
             return;
         }
 
@@ -275,9 +360,31 @@ public class ServerGame implements Runnable {
         }
         snapshot.monsters.addAll(monsters.values());
 
-        String stateMessage = GameProtocol.serializeSnapshot(snapshot);
-        for (ServerNetwork.ClientHandler handler : clientHandlers.values()) {
-            handler.send(stateMessage);
+        stateSequence++;
+        String payload = stateSequence + "|" + GameProtocol.serializeSnapshot(snapshot);
+        byte[] packetData = GameProtocol.createGameUdpPacket(Common.UDP_GAME_STATE, payload);
+
+        for (String playerId : players.keySet()) {
+            serverNetwork.sendGameUdpPacket(playerId, packetData);
         }
+    }
+
+    private synchronized void syncAndSaveOnline() {
+        if (saveData == null) {
+            return;
+        }
+        for (GameData.PlayerState player : players.values()) {
+            for (SaveManager.PlayerSlotData slot : saveData.slots) {
+                if (slot.playerName != null && slot.playerName.equalsIgnoreCase(player.name)) {
+                    slot.x = player.x;
+                    slot.y = player.y;
+                    slot.hp = player.hp;
+                    slot.maxHp = player.maxHp;
+                    slot.status = "ACTIVE";
+                    break;
+                }
+            }
+        }
+        SaveManager.saveOnline(saveData);
     }
 }

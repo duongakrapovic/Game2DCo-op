@@ -20,6 +20,7 @@ public class GameData {
         public boolean isAttacking = false;
         public int attackTicks = 0;
         public int lastAckSeq = -1;
+        public int pingMs = 0;
         public long flashUntil = 0;
         public long invincibleUntil = 0;
 

@@ -52,6 +52,10 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         mainContainer.add(gamePanel, "GAME");
         add(mainContainer);
 
+        setFocusTraversalKeysEnabled(false);
+        mainContainer.setFocusTraversalKeysEnabled(false);
+        gamePanel.setFocusTraversalKeysEnabled(false);
+
         cardLayout.show(mainContainer, "MENU");
         setupKeyBindings();
 
@@ -92,6 +96,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             stopVoiceChat();
             if (netClient != null) netClient.close();
             setTitle("Dungeon Co-op [OFFLINE]");
+            gamePanel.setCurrentRoomName("OFFLINE");
             gamePanel.startOfflineMode(myName);
             switchToGameScene();
         });
@@ -275,6 +280,18 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             @Override public void actionPerformed(ActionEvent e) { sendAttackInput(false); }
         });
 
+        // Bắt sự kiện giữ phím TAB hiển thị Bảng điểm (Scoreboard) kiểu Valorant
+        gamePanel.getInputMap(cond).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_TAB, 0, false), "tab_press");
+        gamePanel.getActionMap().put("tab_press", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { gamePanel.setShowScoreboard(true); }
+        });
+        gamePanel.getInputMap(cond).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_TAB, 0, true), "tab_release");
+        gamePanel.getActionMap().put("tab_release", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { gamePanel.setShowScoreboard(false); }
+        });
+
         gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "esc");
         gamePanel.getActionMap().put("esc", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) {
@@ -284,39 +301,6 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
                     if (netClient != null) netClient.close();
                     cardLayout.show(mainContainer, "MENU");
                 }
-            }
-        });
-
-        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F3, 0), "f3");
-        gamePanel.getActionMap().put("f3", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) { gamePanel.toggleHud(); }
-        });
-
-        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F4, 0), "f4");
-        gamePanel.getActionMap().put("f4", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) {
-                if (netClient != null) {
-                    int cur = netClient.getLagMs();
-                    int next = (cur == 0) ? 50 : (cur == 50) ? 100 : (cur == 100) ? 200 : 0;
-                    netClient.setLagMs(next);
-                }
-            }
-        });
-
-        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0), "f6");
-        gamePanel.getActionMap().put("f6", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) { movement.setPredictionEnabled(!movement.isPredictionEnabled()); }
-        });
-
-        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F7, 0), "f7");
-        gamePanel.getActionMap().put("f7", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) { movement.setInterpolationEnabled(!movement.isInterpolationEnabled()); }
-        });
-
-        gamePanel.getInputMap(cond).put(KeyStroke.getKeyStroke(KeyEvent.VK_F9, 0), "f9");
-        gamePanel.getActionMap().put("f9", new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) {
-                if (netClient != null) netClient.simulateConnectionDrop();
             }
         });
 
@@ -330,7 +314,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         gamePanel.attack = pressed;
         if (netClient != null && netClient.getState() == ClientNetwork.State.CONNECTED) {
             ClientMovement.PredictionInput input = movement.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down, pressed);
-            netClient.send("INPUT:" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.seq + ":" + input.attack);
+            netClient.sendGameInputUdp(input.seq + ":" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.attack);
         }
     }
 
@@ -344,7 +328,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
         if (netClient != null && netClient.getState() == ClientNetwork.State.CONNECTED) {
             ClientMovement.PredictionInput input = movement.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down, gamePanel.attack);
-            netClient.send("INPUT:" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.seq + ":" + input.attack);
+            netClient.sendGameInputUdp(input.seq + ":" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.attack);
         }
     }
 
@@ -357,32 +341,25 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
                 for (int i = 1; i < items.length; i++) roomListModel.addElement(items[i]);
             });
         } else if (line.startsWith(Common.CMD_JOINED + ":")) {
+            String rName = line.substring((Common.CMD_JOINED + ":").length()).trim();
+            gamePanel.setCurrentRoomName(rName);
             SwingUtilities.invokeLater(this::switchToGameScene);
             SwingUtilities.invokeLater(this::startVoiceChat);
         } else if (line.startsWith("RESUMED:")) {
+            String rName = line.substring("RESUMED:".length()).trim();
+            gamePanel.setCurrentRoomName(rName);
             SwingUtilities.invokeLater(this::startVoiceChat);
         } else if ("LEFT".equals(line)) {
+            gamePanel.setCurrentRoomName("");
             SwingUtilities.invokeLater(this::stopVoiceChat);
         } else if (line.startsWith(Common.CMD_STATE)) {
             gamePanel.updateOnlineWorld(line, myName);
-            updateHudDisplay();
         } else if (line.startsWith(Common.CMD_ERROR)) {
             pendingRoomCommand = null;
             String[] parts = line.split(":", 2);
             String message = parts.length > 1 ? parts[1] : "Lỗi từ server.";
             SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, message));
         }
-    }
-
-    private void updateHudDisplay() {
-        if (netClient == null) return;
-        String l1 = String.format("PING %.0f ms (jitter %.1f)   STATE 60/s   down 4.1 KB/s   up 2.0 KB/s",
-                netClient.getRttMs(), netClient.getJitterMs());
-        String l2 = String.format("Dự đoán [F6]: %s   Nội suy [F7]: %s (%d ms)   Lag giả lập [F4]: %d ms",
-                movement.isPredictionEnabled() ? "BẬT" : "TẮT", movement.isInterpolationEnabled() ? "BẬT" : "TẮT", movement.getInterpolationDelayMs(), netClient.getLagMs());
-        String l3 = String.format("Sai số reconcile: %.2f px   Pending: %d   Hiệu chỉnh: %d   Reconnect: %d",
-                movement.maxError(), movement.pendingCount(), movement.correctionCount(), netClient.getReconnectCount());
-        gamePanel.setHudInfo(l1, l2, l3);
     }
 
     private void startVoiceChat() {

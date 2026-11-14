@@ -7,7 +7,19 @@ public class Common {
 
     // CẤU HÌNH MẠNG & HỆ THỐNG
     public static final int TCP_PORT = 8888;
+    public static final int UDP_PORT = 8888;
     public static final int PORT = 8888;
+
+    // UDP CẤU HÌNH & OPCODES
+    public static final String UDP_MAGIC_GAME = "GAM1";
+    public static final byte[] UDP_MAGIC_GAME_BYTES = {'G', 'A', 'M', '1'};
+
+    public static final byte UDP_GAME_REGISTER = 1;
+    public static final byte UDP_GAME_ACK      = 2;
+    public static final byte UDP_GAME_INPUT    = 3;
+    public static final byte UDP_GAME_STATE    = 4;
+    public static final byte UDP_GAME_PING     = 5;
+    public static final byte UDP_GAME_PONG     = 6;
 
     public static final int ORIGINAL_TILE_SIZE = 16;
     public static final float SCALE = 3.0f;

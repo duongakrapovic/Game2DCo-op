@@ -110,6 +110,24 @@ public class ServerApp {
         return sessionsByToken.get(token);
     }
 
+    public ServerSession getSessionByPlayerId(String playerId) {
+        if (playerId == null) return null;
+        for (ServerSession session : sessionsByToken.values()) {
+            if (playerId.equals(session.getPlayerId())) {
+                return session;
+            }
+        }
+        return null;
+    }
+
+    public ServerNetwork getServerNetwork() {
+        return serverNetwork;
+    }
+
+    public void setServerNetwork(ServerNetwork serverNetwork) {
+        this.serverNetwork = serverNetwork;
+    }
+
     public synchronized ServerGame resumeSession(
             String token, ServerSession temporarySession, ServerNetwork.ClientHandler handler) {
         ServerSession session = sessionsByToken.get(token);

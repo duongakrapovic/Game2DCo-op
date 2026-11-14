@@ -5,6 +5,7 @@ import source.common.GameData;
 import source.common.GameMap;
 import source.common.GamePhysics;
 import source.common.GameProtocol;
+import source.common.SaveManager;
 
 import javax.imageio.ImageIO;
 import javax.swing.*;
@@ -12,7 +13,9 @@ import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,10 +42,8 @@ public class ClientGame extends JPanel {
     public boolean left = false, right = false, up = false, down = false, attack = false;
     private ClientApp clientAppRef = null;
 
-    private boolean showHud = true;
-    private String hudLine1 = "";
-    private String hudLine2 = "";
-    private String hudLine3 = "";
+    private volatile boolean showScoreboard = false;
+    private String currentRoomName = "";
     private String bannerMessage = null;
     private String voiceStatus = "";
 
@@ -139,6 +140,19 @@ public class ClientGame extends JPanel {
         renderPlayers = new ConcurrentHashMap<>();
         renderMonsters = new ConcurrentHashMap<>();
 
+        // Khôi phục dữ liệu save Offline nếu có
+        SaveManager.OfflineSaveData offlineSave = SaveManager.loadOfflineSave();
+        if (offlineSave != null) {
+            if (offlineSave.x > 0 || offlineSave.y > 0) {
+                localPlayer.x = offlineSave.x;
+                localPlayer.y = offlineSave.y;
+            }
+            if (offlineSave.hp > 0) {
+                localPlayer.hp = offlineSave.hp;
+                localPlayer.maxHp = offlineSave.maxHp;
+            }
+        }
+
         for (int i = 1; i <= 15; i++) {
             Point pt;
             do {
@@ -155,6 +169,7 @@ public class ClientGame extends JPanel {
             final double TARGET_FPS = 60.0;
             final double OPTIMAL_NS = 1_000_000_000.0 / TARGET_FPS;
             long lastTime = System.nanoTime();
+            int offlineSaveTicks = 0;
 
             while (isLocalRunning) {
                 long now = System.nanoTime();
@@ -214,6 +229,12 @@ public class ClientGame extends JPanel {
                     localPlayer.respawn();
                 }
 
+                // Tự động lưu tiến trình Offline mỗi 15 giây (900 ticks)
+                if (++offlineSaveTicks >= 900) {
+                    offlineSaveTicks = 0;
+                    saveOfflineProgress();
+                }
+
                 repaint();
 
                 long sleepTimeMs = (long)((lastTime - System.nanoTime() + OPTIMAL_NS) / 1_000_000.0);
@@ -225,12 +246,19 @@ public class ClientGame extends JPanel {
         localGameThread.start();
     }
 
+    public synchronized void saveOfflineProgress() {
+        if (localPlayer != null) {
+            SaveManager.saveOffline(myName, localPlayer.x, localPlayer.y, localPlayer.hp, localPlayer.maxHp);
+        }
+    }
+
     public void stopOfflineMode() {
         isLocalRunning = false;
         if (localGameThread != null) {
             localGameThread.interrupt();
             localGameThread = null;
         }
+        saveOfflineProgress();
     }
 
     public void updateOnlineWorld(String stateLine, String myCurrentName) {
@@ -270,12 +298,13 @@ public class ClientGame extends JPanel {
         repaint();
     }
 
-    public void setHudInfo(String l1, String l2, String l3) {
-        this.hudLine1 = l1; this.hudLine2 = l2; this.hudLine3 = l3;
+    public void setShowScoreboard(boolean show) {
+        this.showScoreboard = show;
+        repaint();
     }
 
-    public void toggleHud() {
-        this.showHud = !this.showHud;
+    public void setCurrentRoomName(String name) {
+        this.currentRoomName = name == null ? "" : name;
     }
 
     public void setBannerMessage(String msg) {
@@ -428,20 +457,7 @@ public class ClientGame extends JPanel {
         g2.setColor(myHp > safeMaxHp * 0.3f ? new Color(225, 55, 55) : new Color(255, 120, 0));
         g2.fillRoundRect(28, 44, currentBarW, 14, 8, 8);
 
-        // 4. Hiển thị HUD Mạng (F3)
-        if (showHud && !hudLine1.isEmpty()) {
-            int hudX = 270;
-            int hudWidth = Math.max(0, getWidth() - hudX - 10);
-            g2.setColor(new Color(0, 40, 0, 200));
-            g2.fillRoundRect(hudX, 10, hudWidth, 65, 10, 10);
-            g2.setColor(Color.GREEN);
-            g2.setFont(new Font("Monospaced", Font.BOLD, 13));
-            g2.drawString(hudLine1, hudX + 10, 28);
-            g2.drawString(hudLine2, hudX + 10, 46);
-            g2.drawString(hudLine3, hudX + 10, 64);
-        }
-
-        // 5. Hiển thị trạng thái Voice Chat
+        // 4. Hiển thị trạng thái Voice Chat
         if (!voiceStatus.isEmpty()) {
             g2.setColor(new Color(0, 0, 0, 170));
             g2.fillRoundRect(16, 86, 320, 28, 8, 8);
@@ -460,6 +476,139 @@ public class ClientGame extends JPanel {
             FontMetrics fm = g2.getFontMetrics();
             int tx = (getWidth() - fm.stringWidth(bannerMessage)) / 2;
             g2.drawString(bannerMessage, tx, getHeight() / 2 + 8);
+        }
+
+        // 5. Hiển thị Bảng điểm Giữ phím TAB (Kiểu Valorant)
+        if (showScoreboard) {
+            drawScoreboard(g2);
+        }
+    }
+
+    private void drawScoreboard(Graphics2D g2) {
+        int panelW = 680;
+        int panelH = 340;
+        int panelX = (getWidth() - panelW) / 2;
+        int panelY = (getHeight() - panelH) / 2;
+
+        // Lớp phủ mờ nền toàn màn hình
+        g2.setColor(new Color(0, 0, 0, 140));
+        g2.fillRect(0, 0, getWidth(), getHeight());
+
+        // Bảng nền bán trong suốt bo góc
+        g2.setColor(new Color(15, 20, 30, 230));
+        g2.fillRoundRect(panelX, panelY, panelW, panelH, 16, 16);
+        g2.setColor(new Color(70, 85, 115));
+        g2.setStroke(new BasicStroke(2.0f));
+        g2.drawRoundRect(panelX, panelY, panelW, panelH, 16, 16);
+
+        // Tiêu đề phòng / chế độ chơi
+        String title = isLocalRunning ? "BẢNG ĐIỂM - CHẾ ĐỘ OFFLINE TEST"
+                : (currentRoomName.isEmpty() ? "BẢNG ĐIỂM - PHÒNG CHƠI ONLINE"
+                : "BẢNG ĐIỂM - PHÒNG: " + currentRoomName);
+        g2.setColor(new Color(245, 190, 75));
+        g2.setFont(new Font("Arial", Font.BOLD, 18));
+        g2.drawString(title, panelX + 24, panelY + 36);
+
+        g2.setColor(new Color(170, 180, 200));
+        g2.setFont(new Font("Arial", Font.ITALIC, 12));
+        g2.drawString("[TAB] ĐANG GIỮ ĐỂ XEM BẢNG ĐIỂM", panelX + panelW - 240, panelY + 36);
+
+        // Kẻ ngang phân cách
+        g2.setColor(new Color(50, 60, 80));
+        g2.drawLine(panelX + 16, panelY + 50, panelX + panelW - 16, panelY + 50);
+
+        // Tiêu đề các cột
+        int startY = panelY + 75;
+        g2.setFont(new Font("Arial", Font.BOLD, 13));
+        g2.setColor(new Color(140, 160, 190));
+        g2.drawString("SLOT", panelX + 30, startY);
+        g2.drawString("NGƯỜI CHƠI", panelX + 110, startY);
+        g2.drawString("TRẠNG THÁI", panelX + 310, startY);
+        g2.drawString("MÁU (HP)", panelX + 440, startY);
+        g2.drawString("PING", panelX + 560, startY);
+
+        g2.setColor(new Color(40, 50, 70));
+        g2.drawLine(panelX + 16, startY + 10, panelX + panelW - 16, startY + 10);
+
+        // Danh sách người chơi
+        List<GameData.PlayerState> playerList = new ArrayList<>();
+        if (isLocalRunning) {
+            if (localPlayer != null) {
+                playerList.add(localPlayer);
+            }
+        } else {
+            playerList.addAll(renderPlayers.values());
+        }
+
+        int rowY = startY + 22;
+        int rowH = 46;
+
+        for (int slot = 0; slot < 4; slot++) {
+            int curY = rowY + slot * rowH;
+            boolean hasPlayer = slot < playerList.size();
+            GameData.PlayerState p = hasPlayer ? playerList.get(slot) : null;
+            boolean isMe = p != null && p.name.equals(myName);
+
+            // Nền hàng
+            if (isMe) {
+                g2.setColor(new Color(45, 75, 115, 170));
+                g2.fillRoundRect(panelX + 20, curY, panelW - 40, 38, 8, 8);
+                g2.setColor(new Color(85, 140, 205));
+                g2.drawRoundRect(panelX + 20, curY, panelW - 40, 38, 8, 8);
+            } else if (hasPlayer) {
+                g2.setColor(new Color(25, 32, 45, 130));
+                g2.fillRoundRect(panelX + 20, curY, panelW - 40, 38, 8, 8);
+            } else {
+                g2.setColor(new Color(20, 25, 35, 80));
+                g2.fillRoundRect(panelX + 20, curY, panelW - 40, 38, 8, 8);
+            }
+
+            int textY = curY + 24;
+
+            if (hasPlayer && p != null) {
+                // Slot
+                g2.setColor(Color.WHITE);
+                g2.setFont(new Font("Arial", Font.BOLD, 13));
+                g2.drawString("Slot " + (slot + 1), panelX + 30, textY);
+
+                // Tên
+                if (isMe) {
+                    g2.setColor(new Color(255, 215, 80));
+                    g2.drawString(p.name + " (Bạn)", panelX + 110, textY);
+                } else {
+                    g2.setColor(Color.WHITE);
+                    g2.drawString(p.name, panelX + 110, textY);
+                }
+
+                // Trạng thái
+                if (p.hp > 0) {
+                    g2.setColor(new Color(65, 220, 95));
+                    g2.drawString("SỐNG", panelX + 310, textY);
+                } else {
+                    g2.setColor(new Color(240, 70, 70));
+                    g2.drawString("HỒI SINH", panelX + 310, textY);
+                }
+
+                // Máu
+                g2.setColor(Color.WHITE);
+                g2.drawString(p.hp + " / " + p.maxHp, panelX + 440, textY);
+
+                // Ping
+                int ping = isLocalRunning ? 0 : p.pingMs;
+                Color pingColor = ping < 60 ? new Color(65, 220, 95)
+                        : (ping <= 120 ? new Color(245, 215, 60) : new Color(240, 70, 70));
+                g2.setColor(pingColor);
+                g2.drawString(ping + " ms", panelX + 560, textY);
+            } else {
+                // Slot trống
+                g2.setColor(new Color(130, 140, 160, 140));
+                g2.setFont(new Font("Arial", Font.PLAIN, 13));
+                g2.drawString("Slot " + (slot + 1), panelX + 30, textY);
+                g2.drawString("Slot " + (slot + 1) + " - [Trống]", panelX + 110, textY);
+                g2.drawString("-", panelX + 310, textY);
+                g2.drawString("-", panelX + 440, textY);
+                g2.drawString("-", panelX + 560, textY);
+            }
         }
     }
 }

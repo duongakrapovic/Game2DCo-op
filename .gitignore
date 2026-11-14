@@ -23,3 +23,6 @@ out/
 !README.md
 # Log do server / cong cu do tai sinh ra
 logs/
+# Du lieu luu tru save game
+saves/
+
