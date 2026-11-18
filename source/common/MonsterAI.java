@@ -5,7 +5,7 @@ import static source.common.GamePhysics.*;
 
 public final class MonsterAI {
     private static final int MAX_PATH_NODES = 512;
-    private static final int MONSTER_ATTACK_RANGE = 50;
+    private static final int MONSTER_ATTACK_RANGE = 42;
     private static final int MONSTER_CHASE_RANGE = 450;
     private static final int MONSTER_ATTACK_COOLDOWN_TICKS = 30;
     public static void updateMonster(GameData.MonsterState m, GameData.PlayerState target, GameMap map) {
@@ -56,7 +56,8 @@ public final class MonsterAI {
 
         if (m.pathIndex >= m.currentPath.length) {
             // A player can be just outside attack range while sharing the same tile.
-            if (startTileX == goalTileX && distance > MONSTER_ATTACK_RANGE) {
+            if (startTileX == goalTileX && distance > MONSTER_ATTACK_RANGE
+                    && hasLineOfSight(m.x, m.y, target.x, target.y, map)) {
                 moveMonsterToward(m, dx, dy, dt, map);
             }
             return;

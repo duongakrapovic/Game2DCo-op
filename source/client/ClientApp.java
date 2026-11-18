@@ -68,6 +68,13 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         cardLayout.show(mainContainer, "MENU");
         setupKeyBindings();
 
+        addWindowFocusListener(new WindowAdapter() {
+            @Override public void windowLostFocus(WindowEvent event) {
+                gamePanel.resetInputState();
+                gamePanel.setShowScoreboard(false);
+                sendFrameInput();
+            }
+        });
         addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
@@ -372,7 +379,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     }
 
     public void sendAttackInput(boolean pressed) {
-        gamePanel.attack = pressed;
+        gamePanel.setAttackPressed(pressed);
     }
 
     private void updateKey(String dir, boolean pressed) {
@@ -389,7 +396,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         ClientNetwork client = netClient;
         if (!onlineInRoom || client == null || !client.isGameplayActive()) return;
         ClientMovement.PredictionInput input = movement.step(gamePanel.left, gamePanel.right,
-                gamePanel.up, gamePanel.down, gamePanel.attack);
+                gamePanel.up, gamePanel.down, gamePanel.consumeAttackPress() | gamePanel.attack);
         client.sendGameInputUdp(input.seq + ":" + input.left + ":" + input.right + ":"
                 + input.up + ":" + input.down + ":" + input.attack);
     }
@@ -455,7 +462,10 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         final long generation = client.getGameplayGeneration();
         SwingUtilities.invokeLater(() -> {
             if (netClient == client && client.isGameplayActive()
-                    && client.getGameplayGeneration() == generation) gamePanel.applySnapshot(snapshot, name);
+                    && client.getGameplayGeneration() == generation) {
+                gamePanel.setMyId(client.getMyId());
+                gamePanel.applySnapshot(snapshot, name);
+            }
         });
     }
 
@@ -491,6 +501,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     private void enterOnlineGame() {
         try {
             mapManager.ensureCollisionMapLoaded();
+            gamePanel.setMyId(netClient == null ? "" : netClient.getMyId());
             onlineInRoom = true;
             roomCommandInFlight = false;
             lobbyStatus.setText("Da vao phong: " + gamePanel.currentRoomName);

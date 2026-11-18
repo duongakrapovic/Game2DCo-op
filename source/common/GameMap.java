@@ -30,6 +30,7 @@ public class GameMap {
         }
     }
 
+    private boolean[] spawnReachable;
     private boolean propertiesLoaded;
     private volatile boolean collisionMapLoaded;
     private Tile[] tiles;
@@ -90,6 +91,7 @@ public class GameMap {
     }
 
     public void loadTilesetProperties(String tsxPath) {
+        spawnReachable = null;
         propertiesLoaded = false;
         collisionMapLoaded = false;
         try (InputStream input = openResource(tsxPath)) {
@@ -154,6 +156,7 @@ public class GameMap {
 
     public void loadAllChunks(String folderPath, int maxChunkX, int maxChunkY) {
         collisionMapLoaded = false;
+        spawnReachable = null;
         loadedChunks.clear();
         Map<String, Chunk> chunks = new HashMap<>();
         for (int x = 0; x < maxChunkX; x++) for (int y = 0; y < maxChunkY; y++) {
@@ -205,6 +208,34 @@ public class GameMap {
         if (!valid) { x = Common.SPAWN_X; y = Common.SPAWN_Y; }
         if (!isWalkable(x, y)) throw new IllegalStateException("Default player spawn is blocked or map is incomplete");
         return new java.awt.geom.Point2D.Float(x, y);
+    }
+
+    /** Flood fill on entity-sized standable cells, invalidated whenever collision data reloads. */
+    public synchronized boolean isSpawnReachableAtWorld(int x, int y) {
+        int width = Common.MAX_CHUNK_X * chunkSize, height = Common.MAX_CHUNK_Y * chunkSize;
+        if (x < 0 || y < 0 || x >= width * Common.TILE_SIZE || y >= height * Common.TILE_SIZE) return false;
+        if (spawnReachable == null) {
+            boolean[] reachable = new boolean[width * height];
+            int startX = (int) Common.SPAWN_X / Common.TILE_SIZE;
+            int startY = (int) Common.SPAWN_Y / Common.TILE_SIZE;
+            if (!isWalkable(Common.SPAWN_X, Common.SPAWN_Y)) return false;
+            int[] queue = new int[reachable.length];
+            int start = startY * width + startX, head = 0, tail = 0;
+            queue[tail++] = start; reachable[start] = true;
+            while (head < tail) {
+                int current = queue[head++], col = current % width, row = current / width;
+                for (int direction = 0; direction < 4; direction++) {
+                    int nextX = col + (direction == 0 ? 1 : direction == 1 ? -1 : 0);
+                    int nextY = row + (direction == 2 ? 1 : direction == 3 ? -1 : 0);
+                    if (nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) continue;
+                    int next = nextY * width + nextX;
+                    if (reachable[next] || !isWalkable(nextX * Common.TILE_SIZE, nextY * Common.TILE_SIZE)) continue;
+                    reachable[next] = true; queue[tail++] = next;
+                }
+            }
+            spawnReachable = reachable;
+        }
+        return spawnReachable[(y / Common.TILE_SIZE) * width + x / Common.TILE_SIZE];
     }
 
     public void draw(Graphics2D g2, int focusWorldX, int focusWorldY, int screenWidth, int screenHeight) {

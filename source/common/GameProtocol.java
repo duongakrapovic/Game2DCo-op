@@ -12,15 +12,17 @@ import java.util.*;
 public class GameProtocol {
 
     public static final int MAX_STATE_PACKET_BYTES = 499;
+    public static final byte SNAPSHOT_VERSION = 2;
     private static final int BINARY_HEADER_BYTES = 29;
     private static final int POSITION = 1, HP = 2, ACTION_STATE = 4, IDENTITY = 8, NETWORK = 16, REMOVE = 32;
     private static final int FULL_PLAYER = POSITION | HP | ACTION_STATE | IDENTITY | NETWORK;
+    private static final int FULL_ITEM = POSITION | HP | ACTION_STATE | IDENTITY;
     private static final int FULL_MONSTER = POSITION | HP | ACTION_STATE | IDENTITY;
 
     /** Deltas reference the last full baseline, so losing a delta never poisons later ticks. */
     public static List<byte[]> serializeSnapshotBinary(long stateSeq, long streamId, long baselineSeq,
             GameData.WorldSnapshot current, GameData.WorldSnapshot baseline) {
-        if (current.players.size() > 4 || current.monsters.size() > 64) throw new IllegalArgumentException("Entity limit");
+        if (current.players.size() > 4 || current.monsters.size() > 64 || current.items.size() > ItemSystem.MAX_ITEMS) throw new IllegalArgumentException("Entity limit");
         ByteBuffer body = ByteBuffer.allocate(32768);
         Map<String, GameData.PlayerState> oldPlayers = playersById(baseline);
         Map<String, GameData.MonsterState> oldMonsters = monstersById(baseline);
@@ -55,6 +57,22 @@ public class GameProtocol {
         }
         for (String id : oldMonsters.keySet()) { monsterCount++; putString(body, id); body.put((byte) REMOVE); }
         body.put(monsterCountIndex, (byte) monsterCount);
+        Map<String, GameData.ItemState> oldItems = itemsById(baseline);
+        int itemCountIndex = body.position(); body.putShort((short) 0);
+        int itemCount = 0;
+        for (GameData.ItemState item : current.items) {
+            GameData.ItemState old = oldItems.remove(item.id);
+            int flags = old == null ? FULL_ITEM : itemFlags(item, old);
+            if (flags == 0) continue;
+            itemCount++;
+            putString(body, item.id); body.put((byte) flags);
+            if ((flags & IDENTITY) != 0) putString(body, item.type);
+            if ((flags & POSITION) != 0) body.putFloat(item.x).putFloat(item.y);
+            if ((flags & HP) != 0) body.putShort((short) item.healAmount);
+            if ((flags & ACTION_STATE) != 0) body.put((byte) (item.collected ? 1 : 0));
+        }
+        for (String id : oldItems.keySet()) { itemCount++; putString(body, id); body.put((byte) REMOVE); }
+        body.putShort(itemCountIndex, (short) itemCount);
         int length = body.position();
         int chunkBytes = MAX_STATE_PACKET_BYTES - UDP_HEADER_BYTES - BINARY_HEADER_BYTES;
         int count = (length + chunkBytes - 1) / chunkBytes;
@@ -62,12 +80,27 @@ public class GameProtocol {
         for (int part = 0; part < count; part++) {
             int offset = part * chunkBytes, bytes = Math.min(chunkBytes, length - offset);
             ByteBuffer fragment = ByteBuffer.allocate(BINARY_HEADER_BYTES + bytes);
-            fragment.put((byte) 1).putLong(streamId).putLong(stateSeq).putLong(baselineSeq);
+            fragment.put(SNAPSHOT_VERSION).putLong(streamId).putLong(stateSeq).putLong(baselineSeq);
             fragment.putShort((short) part).putShort((short) count);
             fragment.put(body.array(), offset, bytes);
             packets.add(createGameUdpPacket(Common.UDP_GAME_STATE, fragment.array()));
         }
         return packets;
+    }
+
+    private static int itemFlags(GameData.ItemState item, GameData.ItemState old) {
+        int flags = 0;
+        if (!Objects.equals(item.type, old.type)) flags |= IDENTITY;
+        if (item.x != old.x || item.y != old.y) flags |= POSITION;
+        if (item.healAmount != old.healAmount) flags |= HP;
+        if (item.collected != old.collected) flags |= ACTION_STATE;
+        return flags;
+    }
+
+    private static Map<String, GameData.ItemState> itemsById(GameData.WorldSnapshot snapshot) {
+        Map<String, GameData.ItemState> items = new LinkedHashMap<>();
+        if (snapshot != null) for (GameData.ItemState item : snapshot.items) items.put(item.id, item);
+        return items;
     }
 
     private static int playerFlags(GameData.PlayerState p, GameData.PlayerState old) {
@@ -143,6 +176,11 @@ public class GameProtocol {
             c.flashUntil = m.flashUntil;
             copy.monsters.add(c);
         }
+        for (GameData.ItemState item : snapshot.items) {
+            GameData.ItemState c = new GameData.ItemState(item.id, item.type, item.x, item.y);
+            c.healAmount = item.healAmount; c.collected = item.collected; c.respawnTimer = item.respawnTimer;
+            copy.items.add(c);
+        }
         return copy;
     }
 
@@ -196,6 +234,31 @@ public class GameProtocol {
                 m.spriteNum = (a & 4) != 0 ? 2 : 1; m.isDead = (a & 8) != 0;
             }
         }
+        Map<String, GameData.ItemState> items = itemsById(snapshot);
+        count = Short.toUnsignedInt(buffer.getShort());
+        if (count > ItemSystem.MAX_ITEMS * 2) throw new IllegalArgumentException("Item count");
+        seen.clear();
+        for (int i = 0; i < count; i++) {
+            String id = getString(buffer); int flags = Byte.toUnsignedInt(buffer.get());
+            if (!seen.add(id) || flags == 0 || (flags & ~(FULL_ITEM | REMOVE)) != 0) throw new IllegalArgumentException("Item flags");
+            if (flags == REMOVE) { items.remove(id); continue; }
+            if ((flags & REMOVE) != 0) throw new IllegalArgumentException("Item remove flags");
+            GameData.ItemState item = items.get(id);
+            if (item == null) {
+                if (flags != FULL_ITEM) throw new IllegalArgumentException("Missing item baseline");
+                item = new GameData.ItemState(id, "HEAL", 0, 0); items.put(id, item);
+            }
+            if ((flags & IDENTITY) != 0) item.type = getString(buffer);
+            if ((flags & POSITION) != 0) { item.x = finite(buffer.getFloat()); item.y = finite(buffer.getFloat()); }
+            if ((flags & HP) != 0) item.healAmount = Short.toUnsignedInt(buffer.getShort());
+            if ((flags & ACTION_STATE) != 0) {
+                int collected = Byte.toUnsignedInt(buffer.get());
+                if (collected > 1) throw new IllegalArgumentException("Collected flag");
+                item.collected = collected == 1;
+            }
+        }
+        if (items.size() > ItemSystem.MAX_ITEMS) throw new IllegalArgumentException("Item limit");
+        snapshot.items = new ArrayList<>(items.values());
         if (buffer.hasRemaining() || players.size() > 4 || monsters.size() > 64) throw new IllegalArgumentException("Invalid snapshot size");
         snapshot.players = new ArrayList<>(players.values()); snapshot.monsters = new ArrayList<>(monsters.values());
         return snapshot;
@@ -241,7 +304,7 @@ public class GameProtocol {
             if (length <= BINARY_HEADER_BYTES || length + UDP_HEADER_BYTES > MAX_STATE_PACKET_BYTES) return null;
             try {
                 ByteBuffer in = ByteBuffer.wrap(data, offset, length);
-                if (in.get() != 1) return null;
+                if (in.get() != SNAPSHOT_VERSION) return null;
                 long source = in.getLong(), sequence = in.getLong(), base = in.getLong();
                 int part = Short.toUnsignedInt(in.getShort()), count = Short.toUnsignedInt(in.getShort());
                 if (sequence < 0 || base < 0 || base > sequence || sequence <= lastSequence
@@ -398,6 +461,12 @@ public class GameProtocol {
               .append(m.isDead ? "1" : "0").append(";");
         }
 
+        sb.append("#ITEMS:");
+        for (GameData.ItemState item : snapshot.items) {
+            sb.append(item.id).append(',').append(item.type).append(',').append(fmt2(item.x)).append(',')
+                    .append(fmt2(item.y)).append(',').append(item.collected ? 1 : 0).append(',')
+                    .append(item.healAmount).append(';');
+        }
         return sb.toString();
     }
 
@@ -446,6 +515,19 @@ public class GameProtocol {
                         m.isDead = "1".equals(mData[8]);
                         snapshot.monsters.add(m);
                     }
+                }
+            } else if (sec.startsWith("ITEMS:")) {
+                for (String row : sec.substring(6).split(";")) {
+                    if (row.isBlank()) continue;
+                    String[] fields = row.split(",", -1);
+                    if (fields.length < 5) continue;
+                    try {
+                        GameData.ItemState item = new GameData.ItemState(fields[0], fields[1],
+                                finite(Float.parseFloat(fields[2])), finite(Float.parseFloat(fields[3])));
+                        item.collected = "1".equals(fields[4]);
+                        if (fields.length > 5) item.healAmount = Integer.parseInt(fields[5]);
+                        snapshot.items.add(item);
+                    } catch (NumberFormatException invalidItem) { /* Ignore malformed legacy item records. */ }
                 }
             }
         }

@@ -22,7 +22,7 @@ public class ClientGame extends JPanel {
     });
 
     public boolean isOfflineRunning() { return offline.isRunning(); }
-    public void startOfflineMode(String name) { this.myName = name; movement.reset(); offline.startOfflineMode(name); }
+    public void startOfflineMode(String name) { this.myName = name; myId = "LOCAL_1"; resetInputState(); movement.reset(); offline.startOfflineMode(name); }
     public void stopOfflineMode() { offline.stopOfflineMode(); }
     public void saveOfflineProgress() { offline.saveOfflineProgress(); }
 
@@ -37,11 +37,27 @@ public class ClientGame extends JPanel {
 
     volatile Map<String, GameData.PlayerState> renderPlayers = new ConcurrentHashMap<>();
     volatile Map<String, GameData.MonsterState> renderMonsters = new ConcurrentHashMap<>();
+    volatile Map<String, GameData.ItemState> renderItems = new HashMap<>();
 
     final GameMap mapManager;
     final ClientMovement movement;
 
     String myName = "Player";
+    private String myId = "";
+    private final java.util.concurrent.atomic.AtomicBoolean attackPending = new java.util.concurrent.atomic.AtomicBoolean();
+    public void setMyId(String id) { myId = id == null ? "" : id; }
+    public boolean isMe(GameData.PlayerState player) {
+        return !myId.isEmpty() ? myId.equals(player.id) : java.util.Objects.equals(player.name, myName);
+    }
+    public void setAttackPressed(boolean pressed) {
+        if (pressed && !attack) attackPending.set(true);
+        attack = pressed;
+    }
+    public boolean consumeAttackPress() { return attackPending.getAndSet(false); }
+    public void resetInputState() {
+        left = right = up = down = attack = false;
+        attackPending.set(false);
+    }
 
     public volatile boolean left = false, right = false, up = false, down = false, attack = false;
     private ClientApp clientAppRef = null;
@@ -79,7 +95,7 @@ public class ClientGame extends JPanel {
     }
 
     private void triggerAttack(boolean isPressed) {
-        this.attack = isPressed;
+        setAttackPressed(isPressed);
         if (clientAppRef != null) {
             clientAppRef.sendAttackInput(isPressed);
         }
@@ -112,7 +128,7 @@ public class ClientGame extends JPanel {
                 p.attackTicks = p.isAttacking && previous.isAttacking ? previous.attackTicks + 1 : 0;
             }
             updatedPlayers.put(p.id, p);
-            if (p.name.equals(myName)) movement.onServerState(p.x, p.y, p.lastAckSeq);
+            if (isMe(p)) movement.onServerState(p.x, p.y, p.lastAckSeq);
             else movement.addSnap(p.id, p.x, p.y, p.direction, p.spriteNum);
         }
         movement.retainPlayers(updatedPlayers.keySet());
@@ -124,6 +140,9 @@ public class ClientGame extends JPanel {
         }
         renderPlayers = updatedPlayers;
         renderMonsters = updatedMonsters;
+        Map<String, GameData.ItemState> updatedItems = new HashMap<>();
+        for (GameData.ItemState item : snapshot.items) updatedItems.put(item.id, item);
+        renderItems = updatedItems;
         repaint();
     }
 
@@ -133,6 +152,9 @@ public class ClientGame extends JPanel {
         for (GameData.PlayerState p : snapshot.players) players.put(p.id, p);
         for (GameData.MonsterState m : snapshot.monsters) monsters.put(m.id, m);
         renderPlayers = players; renderMonsters = monsters;
+        Map<String, GameData.ItemState> items = new HashMap<>();
+        for (GameData.ItemState item : snapshot.items) items.put(item.id, item);
+        renderItems = items;
         repaint();
     }
 

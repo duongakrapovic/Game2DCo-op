@@ -19,6 +19,8 @@ public final class OfflineGameLoop implements Runnable {
     private GameData.PlayerState player;
     private String name;
     private boolean previousAttack;
+    private boolean queuedAttack;
+    private ItemSystem itemSystem;
 
     public OfflineGameLoop(ClientGame panel) { this.panel = panel; }
     public boolean isRunning() { return running; }
@@ -38,9 +40,12 @@ public final class OfflineGameLoop implements Runnable {
             monsters.clear();
             for (int i = 1; i <= 15; i++) {
                 Point point = getRandomMapPoint();
-                monsters.add(new GameData.MonsterState("M" + i, point.x, point.y));
+                if (point != null) monsters.add(new GameData.MonsterState("M" + i, point.x, point.y));
             }
+            itemSystem = new ItemSystem(panel.mapManager, random);
+            itemSystem.initialize(this::getRandomMapPoint);
             previousAttack = false;
+            queuedAttack = false;
             running = true;
             generation++;
             thread = new Thread(this, "Offline-Loop");
@@ -70,22 +75,7 @@ public final class OfflineGameLoop implements Runnable {
     }
 
     private Point getRandomMapPoint() {
-        int size = GamePhysics.ENTITY_SIZE;
-        int width = Common.MAX_CHUNK_X * Common.CHUNK_SIZE * Common.TILE_SIZE - size;
-        int height = Common.MAX_CHUNK_Y * Common.CHUNK_SIZE * Common.TILE_SIZE - size;
-        for (int attempt = 0; attempt < 2000; attempt++) {
-            int x = random.nextInt(Math.max(1, width)), y = random.nextInt(Math.max(1, height));
-            if (panel.mapManager.isWalkable(x, y)
-                    && Math.hypot(x - Common.SPAWN_X, y - Common.SPAWN_Y) >= 150) return new Point(x, y);
-        }
-        // Deterministic fallback checks every candidate; never return an unchecked location.
-        for (int y = 0; y <= height; y += Common.TILE_SIZE) {
-            for (int x = 0; x <= width; x += Common.TILE_SIZE) {
-                if (panel.mapManager.isWalkable(x, y)
-                        && Math.hypot(x - Common.SPAWN_X, y - Common.SPAWN_Y) >= 150) return new Point(x, y);
-            }
-        }
-        throw new IllegalStateException("No walkable monster spawn in map");
+        return SpawnSystem.find(panel.mapManager, random, monsters, player == null ? List.of() : List.of(player));
     }
 
     @Override public void run() {
@@ -98,8 +88,10 @@ public final class OfflineGameLoop implements Runnable {
                 player.left = panel.left; player.right = panel.right;
                 player.up = panel.up; player.down = panel.down;
                 boolean attack = panel.attack;
-                if (attack && !previousAttack && !player.isAttacking) {
-                    CombatSystem.resolveAttack(player, monsters, panel.mapManager, () -> 180, null, 0);
+                queuedAttack |= panel.consumeAttackPress() || (attack && !previousAttack);
+                if (queuedAttack && !player.isAttacking) {
+                    queuedAttack = false;
+                    CombatSystem.resolveAttack(player, monsters, panel.mapManager, () -> 180, null, 0, itemSystem::onMonsterKilled);
                 }
                 previousAttack = attack;
                 GamePhysics.updatePlayer(player, panel.mapManager);
@@ -107,6 +99,7 @@ public final class OfflineGameLoop implements Runnable {
                     if (monster.isDead) {
                         if (--monster.respawnTimer <= 0) {
                             Point point = getRandomMapPoint();
+                            if (point == null) { monster.respawnTimer = 60; continue; }
                             monster.x = point.x; monster.y = point.y;
                             monster.hp = monster.maxHp; monster.isDead = false;
                             monster.flashUntil = 0; monster.nextPathAt = 0;
@@ -115,9 +108,11 @@ public final class OfflineGameLoop implements Runnable {
                     } else MonsterAI.updateMonster(monster, player, panel.mapManager);
                 }
                 if (player.hp <= 0) player.respawn();
+                itemSystem.update(List.of(player), this::getRandomMapPoint);
                 if (++saveTicks >= 900) { saveTicks = 0; saveOfflineProgress(); }
                 GameData.WorldSnapshot snapshot = new GameData.WorldSnapshot();
                 snapshot.players.add(player); snapshot.monsters.addAll(monsters);
+                snapshot.items.addAll(itemSystem.items());
                 view = GameProtocol.copySnapshot(snapshot);
             }
             SwingUtilities.invokeLater(() -> {

@@ -76,7 +76,7 @@ public final class ScoreboardOverlay {
             int curY = rowY + slot * rowH;
             boolean hasPlayer = slot < playerList.size();
             GameData.PlayerState p = hasPlayer ? playerList.get(slot) : null;
-            boolean isMe = p != null && p.name.equals(myName);
+            boolean isMe = p != null && panel.isMe(p);
 
             // Nền hàng
             if (isMe) {

@@ -2,15 +2,14 @@ package source.client;
 
 import source.common.*;
 import java.awt.*;
-import java.util.List;
 import java.util.*;
 import javax.imageio.ImageIO;
-import java.io.File;
 
 public final class ClientRenderer {
     private final Map<String, Image[]> spriteMap = new HashMap<>();
     private final Map<String, Image[]> axeSpriteMap = new HashMap<>();
     private final Image[] slimeSprites = new Image[2];
+    private Image potionImage;
     private final ScoreboardOverlay scoreboard = new ScoreboardOverlay();
     public ClientRenderer() { loadAssets(); }
     private void loadAssets() {
@@ -18,29 +17,36 @@ public final class ClientRenderer {
         String mPath = "source/content/monster/";
         String[] directions = {"down", "up", "left", "right"};
 
-        try {
             for (String dir : directions) {
                 Image[] frames = new Image[2];
-                frames[0] = ImageIO.read(new File(pPath + "boy_" + dir + "_1.png"));
-                frames[1] = ImageIO.read(new File(pPath + "boy_" + dir + "_2.png"));
+                frames[0] = loadRequiredImage(pPath + "boy_" + dir + "_1.png");
+                frames[1] = loadRequiredImage(pPath + "boy_" + dir + "_2.png");
                 spriteMap.put(dir, frames);
             }
 
             for (String dir : directions) {
                 Image[] axeFrames = new Image[2];
-                axeFrames[0] = ImageIO.read(new File(pPath + "boy_axe_" + dir + "_1.png"));
-                axeFrames[1] = ImageIO.read(new File(pPath + "boy_axe_" + dir + "_2.png"));
+                axeFrames[0] = loadRequiredImage(pPath + "boy_axe_" + dir + "_1.png");
+                axeFrames[1] = loadRequiredImage(pPath + "boy_axe_" + dir + "_2.png");
                 axeSpriteMap.put(dir, axeFrames);
             }
 
-            slimeSprites[0] = ImageIO.read(new File(mPath + "greenslime_down_1.png"));
-            slimeSprites[1] = ImageIO.read(new File(mPath + "greenslime_down_2.png"));
+            slimeSprites[0] = loadRequiredImage(mPath + "greenslime_down_1.png");
+            slimeSprites[1] = loadRequiredImage(mPath + "greenslime_down_2.png");
+            potionImage = loadRequiredImage("source/content/object/healthposion.png");
+    }
 
-        } catch (Exception e) {
-            System.err.println("[ClientGame] Lỗi nạp hình ảnh: " + e.getMessage());
+    private Image loadRequiredImage(String path) {
+        try (java.io.InputStream input = new java.io.FileInputStream(path)) {
+            Image image = ImageIO.read(input);
+            if (image == null) throw new java.io.IOException("Unsupported image format");
+            return image;
+        } catch (java.io.IOException error) {
+            throw new IllegalStateException("Khong nap duoc asset: " + path, error);
         }
     }
     public void render(Graphics2D g2, ClientGame panel) {
+        g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
 
         String myName = panel.myName;
         ClientMovement movement = panel.movement;
@@ -59,7 +65,7 @@ public final class ClientRenderer {
         int myMaxHp = 100;
 
         for (GameData.PlayerState p : playersSnapshot.values()) {
-            if (p.name.equals(myName)) {
+            if (panel.isMe(p)) {
                 myX = (int) (panel.isOfflineRunning() ? p.x : movement.x());
                 myY = (int) (panel.isOfflineRunning() ? p.y : movement.y());
                 myHp = p.hp;
@@ -80,6 +86,14 @@ public final class ClientRenderer {
 
         int entitySize = GamePhysics.ENTITY_SIZE;
 
+        // Use the original potion sprite from tranvanducb23dccn191.
+        for (GameData.ItemState item : panel.renderItems.values()) {
+            if (item.collected) continue;
+            int x = (int) item.x - camX, y = (int) item.y - camY;
+            if (x + entitySize < 0 || y + entitySize < 0 || x > width || y > height) continue;
+            g2.drawImage(potionImage, x, y, entitySize, entitySize, null);
+        }
+
         // 1. Vẽ Quái Slime
         for (GameData.MonsterState m : monstersSnapshot.values()) {
             if (m.isDead) continue;
@@ -87,12 +101,7 @@ public final class ClientRenderer {
             int screenY = (int) m.y - camY;
 
             Image currentSlime = slimeSprites[(m.spriteNum == 2) ? 1 : 0];
-            if (currentSlime != null) {
-                g2.drawImage(currentSlime, screenX, screenY, entitySize, entitySize, null);
-            } else {
-                g2.setColor(Color.GREEN);
-                g2.fillRoundRect(screenX, screenY, entitySize, entitySize, 12, 12);
-            }
+            g2.drawImage(currentSlime, screenX, screenY, entitySize, entitySize, null);
 
             if (System.currentTimeMillis() < m.flashUntil) {
                 g2.setColor(new Color(255, 25, 25, 140));
@@ -114,7 +123,7 @@ public final class ClientRenderer {
             String direction = p.direction;
             int spriteNum = p.spriteNum;
             if (!panel.isOfflineRunning()) {
-                if (p.name.equals(myName)) { drawXPos = movement.x(); drawYPos = movement.y(); }
+                if (panel.isMe(p)) { drawXPos = movement.x(); drawYPos = movement.y(); }
                 else {
                     ClientMovement.Snap interpolated = movement.getInterpolatedState(p.id);
                     if (interpolated != null) {
@@ -169,9 +178,6 @@ public final class ClientRenderer {
                 } else {
                     g2.drawImage(currentSprite, screenX, screenY, entitySize, entitySize, null);
                 }
-            } else {
-                g2.setColor(p.name.equals(myName) ? Color.CYAN : Color.BLUE);
-                g2.fillRect(screenX, screenY, entitySize, entitySize);
             }
 
             if (System.currentTimeMillis() < p.flashUntil) {
@@ -186,7 +192,7 @@ public final class ClientRenderer {
             g2.setColor(Color.RED);
             g2.fillRect(screenX, screenY - 5, entitySize, 4);
             g2.setColor(Color.CYAN);
-            g2.fillRect(screenX, screenY - 5, (int)(entitySize * ((float)p.hp / p.maxHp)), 4);
+            g2.fillRect(screenX, screenY - 5, Math.max(0, Math.min(entitySize, (int) (entitySize * ((float) Math.max(0, p.hp) / Math.max(1, p.maxHp))))), 4);
         }
 
         // 3. Hiển thị HUD cá nhân & Máu người chơi

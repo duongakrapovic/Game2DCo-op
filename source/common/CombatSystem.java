@@ -12,6 +12,13 @@ public final class CombatSystem {
     public static void resolveAttack(GameData.PlayerState player,
             Iterable<GameData.MonsterState> monsters, GameMap map,
             IntSupplier respawnTicks, MonsterHistory history, long tick) {
+        resolveAttack(player, monsters, map, respawnTicks, history, tick, ignored -> {});
+    }
+
+    public static void resolveAttack(GameData.PlayerState player,
+            Iterable<GameData.MonsterState> monsters, GameMap map,
+            IntSupplier respawnTicks, MonsterHistory history, long tick,
+            java.util.function.Consumer<GameData.MonsterState> onKilled) {
         player.isAttacking = true;
         player.attackTicks = 0;
         Rectangle attack = GamePhysics.getAttackHitbox(player.x, player.y, player.direction);
@@ -21,7 +28,8 @@ public final class CombatSystem {
             if (monster.isDead) continue;
             Rectangle bounds = history == null ? GamePhysics.getEntityBounds(monster.x, monster.y)
                     : history.boundsAt(monster, tick - rewindTicks);
-            if (!attack.intersects(bounds)) continue;
+            if (!attack.intersects(bounds) || !MonsterAI.hasLineOfSight(
+                    player.x, player.y, bounds.x, bounds.y, map)) continue;
             monster.hp = Math.max(0, monster.hp - 15);
             monster.flashUntil = now + 150;
             // Only the collision query is rewound; damage and knockback use live state.
@@ -32,6 +40,7 @@ public final class CombatSystem {
                 monster.currentPath = new int[0][2];
                 monster.pathIndex = 0;
                 if (history != null) history.clear(monster.id);
+                onKilled.accept(monster);
             }
         }
     }

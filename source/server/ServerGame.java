@@ -7,6 +7,8 @@ import source.common.GamePhysics;
 import source.common.GameProtocol;
 import source.common.CombatSystem;
 import source.common.MonsterAI;
+import source.common.ItemSystem;
+import source.common.SpawnSystem;
 import java.util.concurrent.atomic.AtomicReference;
 
 import java.awt.Point;
@@ -32,6 +34,8 @@ public class ServerGame implements Runnable {
 
     private final GameMap mapManager;
     private final Random random = new Random();
+    private final ItemSystem itemSystem;
+    private final Map<String, Boolean> pendingAttackTriggers = new ConcurrentHashMap<>();
     private volatile boolean running = true;
     private final Thread loopThread;
     private final RoomSaveManager saves;
@@ -56,12 +60,14 @@ public class ServerGame implements Runnable {
         mapManager.ensureCollisionMapLoaded();
         mapManager.validatedPlayerSpawn(Common.SPAWN_X, Common.SPAWN_Y);
         this.saves = new RoomSaveManager(roomId, mapManager);
+        this.itemSystem = new ItemSystem(mapManager, random);
 
         for (int i = 1; i <= MONSTER_COUNT; i++) {
             Point spawn = findRandomMapPoint();
-            monsters.put("M" + i, new GameData.MonsterState("M" + i, spawn.x, spawn.y));
+            if (spawn != null) monsters.put("M" + i, new GameData.MonsterState("M" + i, spawn.x, spawn.y));
         }
 
+        itemSystem.initialize(this::findRandomMapPoint);
         loopThread = new Thread(this, "RoomLoop-" + roomId);
         loopThread.start();
     }
@@ -109,6 +115,7 @@ public class ServerGame implements Runnable {
         player.left = player.right = player.up = player.down = false;
         attackInputs.put(playerId, false);
         previousAttackInputs.put(playerId, false);
+        pendingAttackTriggers.remove(playerId);
         saves.detach(player, false);
     }
 
@@ -119,6 +126,7 @@ public class ServerGame implements Runnable {
         lastAcks.remove(playerId);
         attackInputs.remove(playerId);
         previousAttackInputs.remove(playerId);
+        pendingAttackTriggers.remove(playerId);
         if (player != null) saves.detach(player, true);
         forceFullState = true;
     }
@@ -129,6 +137,7 @@ public class ServerGame implements Runnable {
         GameData.PlayerInput previous = buffer.get();
         if (input.seq <= lastAcks.getOrDefault(playerId, -1)
                 || (previous != null && input.seq <= previous.seq)) return;
+        if (input.attack && (previous == null || !previous.attack)) pendingAttackTriggers.put(playerId, true);
         buffer.set(input);
     }
 
@@ -180,6 +189,7 @@ public class ServerGame implements Runnable {
                     if (player.hp <= 0) player.respawn();
                 }
                 updateMonsters();
+                itemSystem.update(players.values(), this::findRandomMapPoint);
                 broadcastUdpState();
                 tick++;
                 if (++saveTickCounter >= 900) {
@@ -206,9 +216,11 @@ public class ServerGame implements Runnable {
 
     private void updatePlayerAttack(GameData.PlayerState player) {
         boolean pressed = attackInputs.getOrDefault(player.id, false);
-        if (pressed && !previousAttackInputs.getOrDefault(player.id, false) && !player.isAttacking) {
+        if (pressed && !previousAttackInputs.getOrDefault(player.id, false)) pendingAttackTriggers.put(player.id, true);
+        if (pendingAttackTriggers.getOrDefault(player.id, false) && !player.isAttacking) {
+            pendingAttackTriggers.remove(player.id);
             CombatSystem.resolveAttack(player, monsters.values(), mapManager,
-                    this::randomRespawnTicks, history, tick);
+                    this::randomRespawnTicks, history, tick, itemSystem::onMonsterKilled);
         }
         previousAttackInputs.put(player.id, pressed);
     }
@@ -218,6 +230,7 @@ public class ServerGame implements Runnable {
             if (monster.isDead) {
                 if (--monster.respawnTimer <= 0) {
                     Point spawn = findRandomMapPoint();
+                    if (spawn == null) { monster.respawnTimer = 60; continue; }
                     history.clear(monster.id);
                     monster.x = spawn.x;
                     monster.y = spawn.y;
@@ -252,46 +265,7 @@ public class ServerGame implements Runnable {
     }
 
     private Point findRandomMapPoint() {
-        int width = Common.MAX_CHUNK_X * Common.CHUNK_SIZE * Common.TILE_SIZE;
-        int height = Common.MAX_CHUNK_Y * Common.CHUNK_SIZE * Common.TILE_SIZE;
-        int maxX = width - GamePhysics.ENTITY_SIZE;
-        int maxY = height - GamePhysics.ENTITY_SIZE;
-
-        for (int attempt = 0; attempt < 2000; attempt++) {
-            int x = random.nextInt(maxX + 1);
-            int y = random.nextInt(maxY + 1);
-            if (!isWalkable(x, y)
-                    || Math.hypot(x - Common.SPAWN_X, y - Common.SPAWN_Y)
-                            < GamePhysics.ENTITY_SIZE * 3) {
-                continue;
-            }
-
-            Rectangle candidate = GamePhysics.getEntityBounds(x, y);
-            boolean overlaps = false;
-            for (GameData.MonsterState existing : monsters.values()) {
-                if (!existing.isDead
-                        && candidate.intersects(GamePhysics.getEntityBounds(existing.x, existing.y))) {
-                    overlaps = true;
-                    break;
-                }
-            }
-            if (!overlaps) {
-                for (GameData.PlayerState player : players.values()) {
-                    if (candidate.intersects(GamePhysics.getEntityBounds(player.x, player.y))) {
-                        overlaps = true;
-                        break;
-                    }
-                }
-            }
-            if (!overlaps) {
-                return new Point(x, y);
-            }
-        }
-        throw new IllegalStateException("Khong tim duoc vi tri hop le de sinh Slime trong map.");
-    }
-
-    private boolean isWalkable(int x, int y) {
-        return mapManager.isWalkable(x, y);
+        return SpawnSystem.find(mapManager, random, monsters.values(), players.values());
     }
 
     private int randomRespawnTicks() {
@@ -307,6 +281,7 @@ public class ServerGame implements Runnable {
             snapshot.players.add(player);
         }
         snapshot.monsters.addAll(monsters.values());
+        snapshot.items.addAll(itemSystem.items());
         stateSequence++;
         boolean full = forceFullState || baseline == null || stateSequence % 60 == 0;
         if (full) baselineSequence = stateSequence;

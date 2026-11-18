@@ -96,6 +96,18 @@ public class GameData {
      * object so the server and offline simulation can use the same code.
      */
 
+    public static class ItemState {
+        public String id;
+        public String type;
+        public float x, y;
+        public int healAmount = 30;
+        public boolean collected;
+        public int respawnTimer;
+        public ItemState(String id, String type, float x, float y) {
+            this.id = id; this.type = type; this.x = x; this.y = y;
+        }
+    }
+
     public static class PlayerInput {
         public final int seq;
         public final boolean left, right, up, down;
@@ -121,6 +133,7 @@ public class GameData {
         public long timestamp;
         public List<PlayerState> players = new ArrayList<>();
         public List<MonsterState> monsters = new ArrayList<>();
+        public List<ItemState> items = new ArrayList<>();
 
         public WorldSnapshot() {
             this.timestamp = System.currentTimeMillis();

@@ -185,7 +185,7 @@ public class GamePhysics {
     }
 
     public static Rectangle getAttackHitbox(float x, float y, String direction) {
-        int range = 24;
+        int range = 36;
         switch (direction) {
             case "up": return new Rectangle((int) x, (int) y - range, ENTITY_SIZE, range);
             case "down": return new Rectangle((int) x, (int) y + ENTITY_SIZE, ENTITY_SIZE, range);
