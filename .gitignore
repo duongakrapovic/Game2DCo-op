@@ -23,6 +23,6 @@ out/
 !README.md
 # Log do server / cong cu do tai sinh ra
 logs/
-# Du lieu luu tru save game
+# Lưu tiến trình chơi cục bộ và file tạm khi chạy
 saves/
-
+.runtime/
