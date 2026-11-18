@@ -20,6 +20,7 @@ public class GameMap {
         public int chunkX, chunkY;
         public int size;
         public int[][] mapTileNum;
+        public int[][][] layers;
 
         public Chunk(int chunkX, int chunkY, int size) {
             this.chunkX = chunkX;
@@ -29,6 +30,8 @@ public class GameMap {
         }
     }
 
+    private boolean propertiesLoaded;
+    private volatile boolean collisionMapLoaded;
     private Tile[] tiles;
     private final Set<Integer> collisionTiles = new HashSet<>();
     private final int chunkSize = Common.CHUNK_SIZE;
@@ -43,17 +46,17 @@ public class GameMap {
         }
     }
 
-    public void loadTilesetImage(String pngPath, int originalTileSize) {
-        try {
-            InputStream is = null;
-            File file = new File(pngPath);
-            if (file.exists()) is = new FileInputStream(file);
-            else is = getClass().getResourceAsStream("/" + pngPath);
+    protected InputStream openResource(String path) throws IOException {
+        File file = new File(path);
+        return file.exists() ? new FileInputStream(file) : getClass().getResourceAsStream("/" + path);
+    }
 
+    public void loadTilesetImage(String pngPath, int originalTileSize) {
+        try (InputStream is = openResource(pngPath)) {
             if (is == null) throw new FileNotFoundException("Không tìm thấy file ảnh Tileset: " + pngPath);
 
             BufferedImage tileset = ImageIO.read(is);
-            is.close();
+
 
             int cols = tileset.getWidth() / originalTileSize;
             int rows = tileset.getHeight() / originalTileSize;
@@ -75,114 +78,133 @@ public class GameMap {
         }
     }
 
+    private org.w3c.dom.Document readXml(InputStream input) throws Exception {
+        if (input == null) throw new FileNotFoundException("Map resource not found");
+        javax.xml.parsers.DocumentBuilderFactory factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        factory.setXIncludeAware(false);
+        factory.setExpandEntityReferences(false);
+        return factory.newDocumentBuilder().parse(input);
+    }
+
     public void loadTilesetProperties(String tsxPath) {
-        try {
-            InputStream is = null;
-            File file = new File(tsxPath);
-            if (file.exists()) is = new FileInputStream(file);
-            else is = getClass().getResourceAsStream("/" + tsxPath);
-
-            if (is == null) throw new FileNotFoundException("Không tìm thấy file TSX: " + tsxPath);
-
-            BufferedReader br = new BufferedReader(new InputStreamReader(is));
-            StringBuilder xmlBuilder = new StringBuilder();
-            String line;
-            while ((line = br.readLine()) != null) xmlBuilder.append(line.trim()).append(" ");
-            br.close();
-
-            String xml = xmlBuilder.toString();
-            String[] tileBlocks = xml.split("<tile ");
-
-            for (int i = 1; i < tileBlocks.length; i++) {
-                String block = tileBlocks[i];
-                if (block.startsWith("id=\"")) {
-                    int startId = 4;
-                    int endId = block.indexOf("\"", startId);
-                    int tileId = Integer.parseInt(block.substring(startId, endId));
-
-                    if (block.contains("name=\"collision\"") && (block.contains("value=\"true\"") || block.contains("value=\"1\""))) {
-                        collisionTiles.add(tileId);
-                        if (tiles != null && tileId >= 0 && tileId < tiles.length) {
-                            tiles[tileId].collision = true;
-                        }
-                    }
+        propertiesLoaded = false;
+        collisionMapLoaded = false;
+        try (InputStream input = openResource(tsxPath)) {
+            org.w3c.dom.Element root = readXml(input).getDocumentElement();
+            if (!"tileset".equals(root.getTagName())) throw new IOException("Expected tileset XML");
+            Set<Integer> blocked = new HashSet<>();
+            org.w3c.dom.NodeList tileNodes = root.getElementsByTagName("tile");
+            for (int i = 0; i < tileNodes.getLength(); i++) {
+                org.w3c.dom.Element tile = (org.w3c.dom.Element) tileNodes.item(i);
+                int id = Integer.parseInt(tile.getAttribute("id"));
+                org.w3c.dom.NodeList properties = tile.getElementsByTagName("property");
+                for (int j = 0; j < properties.getLength(); j++) {
+                    org.w3c.dom.Element property = (org.w3c.dom.Element) properties.item(j);
+                    String value = property.hasAttribute("value") ? property.getAttribute("value") : property.getTextContent().trim();
+                    if ("collision".equals(property.getAttribute("name"))
+                            && ("true".equalsIgnoreCase(value) || "1".equals(value))) blocked.add(id);
                 }
             }
+            if (blocked.isEmpty()) throw new IOException("Tileset has no collision definitions");
+            collisionTiles.clear(); collisionTiles.addAll(blocked);
+            if (tiles != null) for (int i = 0; i < tiles.length; i++) tiles[i].collision = blocked.contains(i);
+            propertiesLoaded = true;
         } catch (Exception e) {
-            System.err.println("[GameMap] Lỗi parse file TSX: " + e.getMessage());
+            throw new IllegalStateException("Cannot load tileset collision: " + tsxPath, e);
         }
     }
 
     public Chunk loadChunkFromFile(int chunkX, int chunkY, String folderPath) {
-        Chunk c = new Chunk(chunkX, chunkY, chunkSize);
-        try {
-            String fileName = "chunk" + chunkX + "_" + chunkY + ".tmx";
-            File f = new File(folderPath, fileName);
-            InputStream is = null;
-
-            if (f.exists()) is = new FileInputStream(f);
-            else is = getClass().getResourceAsStream("/" + folderPath + "/" + fileName);
-
-            if (is == null) throw new FileNotFoundException("Không tìm thấy file Chunk: " + fileName);
-
-            BufferedReader br = new BufferedReader(new InputStreamReader(is));
-            StringBuilder xmlBuilder = new StringBuilder();
-            String line;
-            while ((line = br.readLine()) != null) xmlBuilder.append(line.trim()).append(" ");
-            br.close();
-
-            String content = xmlBuilder.toString();
-            int start = content.indexOf("<data encoding=\"csv\">") + "<data encoding=\"csv\">".length();
-            int end = content.indexOf("</data>");
-            String csv = content.substring(start, end).trim();
-            String[] numbers = csv.split(",");
-
-            int idx = 0;
-            for (int r = 0; r < chunkSize; r++) {
-                for (int col = 0; col < chunkSize; col++) {
-                    if (idx < numbers.length) {
-                        int num = Integer.parseInt(numbers[idx].trim());
-                        c.mapTileNum[r][col] = (num == 0) ? -1 : num - 1;
-                        idx++;
-                    }
+        String path = folderPath + "/chunk" + chunkX + "_" + chunkY + ".tmx";
+        try (InputStream input = openResource(path)) {
+            org.w3c.dom.Element root = readXml(input).getDocumentElement();
+            if (!"map".equals(root.getTagName())
+                    || Integer.parseInt(root.getAttribute("width")) != chunkSize
+                    || Integer.parseInt(root.getAttribute("height")) != chunkSize) throw new IOException("Invalid chunk dimensions");
+            int firstGid = 1;
+            org.w3c.dom.NodeList tilesets = root.getElementsByTagName("tileset");
+            if (tilesets.getLength() > 1) throw new IOException("Multiple tilesets are not supported");
+            if (tilesets.getLength() == 1) firstGid = Integer.parseInt(((org.w3c.dom.Element) tilesets.item(0)).getAttribute("firstgid"));
+            org.w3c.dom.NodeList layerNodes = root.getElementsByTagName("layer");
+            if (layerNodes.getLength() == 0) throw new IOException("Chunk has no tile layers");
+            Chunk chunk = new Chunk(chunkX, chunkY, chunkSize);
+            chunk.layers = new int[layerNodes.getLength()][chunkSize][chunkSize];
+            for (int layer = 0; layer < layerNodes.getLength(); layer++) {
+                org.w3c.dom.Element element = (org.w3c.dom.Element) layerNodes.item(layer);
+                org.w3c.dom.Element data = (org.w3c.dom.Element) element.getElementsByTagName("data").item(0);
+                if (data == null || !"csv".equals(data.getAttribute("encoding"))) throw new IOException("Expected CSV tile layer");
+                String[] numbers = data.getTextContent().trim().split(",");
+                if (numbers.length != chunkSize * chunkSize) throw new IOException("Incomplete tile layer");
+                for (int index = 0; index < numbers.length; index++) {
+                    long gid = Long.parseLong(numbers[index].trim()) & 0x0fffffffL;
+                    int tile = gid == 0 ? -1 : Math.toIntExact(gid - firstGid);
+                    if (tile < -1 || (tiles != null && tile >= tiles.length)) throw new IOException("Tile ID outside tileset");
+                    chunk.layers[layer][index / chunkSize][index % chunkSize] = tile;
                 }
             }
-            return c;
+            chunk.mapTileNum = chunk.layers[0];
+            return chunk;
         } catch (Exception e) {
-            System.err.println("[GameMap] Lỗi nạp Chunk: " + e.getMessage());
-            return c;
+            throw new IllegalStateException("Cannot load map chunk: " + path, e);
         }
     }
 
     public void loadAllChunks(String folderPath, int maxChunkX, int maxChunkY) {
-        for (int cx = 0; cx < maxChunkX; cx++) {
-            for (int cy = 0; cy < maxChunkY; cy++) {
-                Chunk c = loadChunkFromFile(cx, cy, folderPath);
-                if (c != null) {
-                    loadedChunks.put(cx + "_" + cy, c);
-                }
-            }
+        collisionMapLoaded = false;
+        loadedChunks.clear();
+        Map<String, Chunk> chunks = new HashMap<>();
+        for (int x = 0; x < maxChunkX; x++) for (int y = 0; y < maxChunkY; y++) {
+            chunks.put(x + "_" + y, loadChunkFromFile(x, y, folderPath));
         }
+        loadedChunks.putAll(chunks);
+        collisionMapLoaded = propertiesLoaded && maxChunkX == Common.MAX_CHUNK_X && maxChunkY == Common.MAX_CHUNK_Y;
+    }
+
+    public synchronized void ensureCollisionMapLoaded() {
+        if (collisionMapLoaded) return;
+        initTileset(256);
+        loadTilesetProperties("source/content/map/tileset.tsx");
+        loadAllChunks("source/content/map", Common.MAX_CHUNK_X, Common.MAX_CHUNK_Y);
+        if (!collisionMapLoaded) throw new IllegalStateException("Map is not ready");
     }
 
     public boolean isCollisionAtWorld(int worldX, int worldY) {
-        if (worldX < 0 || worldY < 0) return true;
+        int maxWidth = Common.MAX_CHUNK_X * chunkSize * Common.TILE_SIZE;
+        int maxHeight = Common.MAX_CHUNK_Y * chunkSize * Common.TILE_SIZE;
+        if (!propertiesLoaded || worldX < 0 || worldY < 0 || worldX >= maxWidth || worldY >= maxHeight) return true;
+        int col = worldX / Common.TILE_SIZE, row = worldY / Common.TILE_SIZE;
+        Chunk chunk = loadedChunks.get((col / chunkSize) + "_" + (row / chunkSize));
+        if (chunk == null) return true;
+        int localCol = col % chunkSize, localRow = row % chunkSize;
+        boolean hasGround = false;
+        for (int[][] layer : chunk.layers) {
+            int tile = layer[localRow][localCol];
+            if (tile >= 0) hasGround = true;
+            if (collisionTiles.contains(tile)) return true;
+        }
+        return !hasGround;
+    }
 
-        int tileCol = Math.floorDiv(worldX, Common.TILE_SIZE);
-        int tileRow = Math.floorDiv(worldY, Common.TILE_SIZE);
+    public boolean isWalkable(float x, float y) {
+        int size = GamePhysics.ENTITY_SIZE;
+        int maxWidth = Common.MAX_CHUNK_X * chunkSize * Common.TILE_SIZE;
+        int maxHeight = Common.MAX_CHUNK_Y * chunkSize * Common.TILE_SIZE;
+        if (!Float.isFinite(x) || !Float.isFinite(y) || x < 0 || y < 0
+                || x + size > maxWidth || y + size > maxHeight) return false;
+        int left = (int) Math.floor(x), top = (int) Math.floor(y);
+        int right = (int) Math.floor(x + size - 0.001f), bottom = (int) Math.floor(y + size - 0.001f);
+        return !isCollisionAtWorld(left, top) && !isCollisionAtWorld(right, top)
+                && !isCollisionAtWorld(left, bottom) && !isCollisionAtWorld(right, bottom);
+    }
 
-        int chunkX = tileCol / chunkSize;
-        int chunkY = tileRow / chunkSize;
-        int inChunkCol = tileCol % chunkSize;
-        int inChunkRow = tileRow % chunkSize;
-
-        if (chunkX >= Common.MAX_CHUNK_X || chunkY >= Common.MAX_CHUNK_Y) return true;
-
-        Chunk c = loadedChunks.get(chunkX + "_" + chunkY);
-        if (c == null) return false;
-
-        int tileNum = c.mapTileNum[inChunkRow][inChunkCol];
-        return tileNum >= 0 && collisionTiles.contains(tileNum);
+    public java.awt.geom.Point2D.Float validatedPlayerSpawn(float x, float y) {
+        boolean valid = !(x == 0 && y == 0) && isWalkable(x, y);
+        if (!valid) { x = Common.SPAWN_X; y = Common.SPAWN_Y; }
+        if (!isWalkable(x, y)) throw new IllegalStateException("Default player spawn is blocked or map is incomplete");
+        return new java.awt.geom.Point2D.Float(x, y);
     }
 
     public void draw(Graphics2D g2, int focusWorldX, int focusWorldY, int screenWidth, int screenHeight) {
@@ -202,9 +224,14 @@ public class GameMap {
             int chunkWorldX = c.chunkX * c.size * Common.TILE_SIZE;
             int chunkWorldY = c.chunkY * c.size * Common.TILE_SIZE;
 
-            for (int r = 0; r < c.size; r++) {
-                for (int col = 0; col < c.size; col++) {
-                    int tileNum = c.mapTileNum[r][col];
+            int startCol = Math.max(0, Math.floorDiv(camX - chunkWorldX, Common.TILE_SIZE));
+            int endCol = Math.min(c.size, Math.floorDiv(camX + screenWidth - 1 - chunkWorldX, Common.TILE_SIZE) + 1);
+            int startRow = Math.max(0, Math.floorDiv(camY - chunkWorldY, Common.TILE_SIZE));
+            int endRow = Math.min(c.size, Math.floorDiv(camY + screenHeight - 1 - chunkWorldY, Common.TILE_SIZE) + 1);
+            for (int r = startRow; r < endRow; r++) {
+                for (int col = startCol; col < endCol; col++) {
+                    for (int[][] layer : c.layers) {
+                    int tileNum = layer[r][col];
                     if (tiles != null && tileNum >= 0 && tileNum < tiles.length) {
                         int tileWorldX = chunkWorldX + col * Common.TILE_SIZE;
                         int tileWorldY = chunkWorldY + r * Common.TILE_SIZE;
@@ -218,6 +245,7 @@ public class GameMap {
                                 g2.drawImage(tiles[tileNum].image, screenX, screenY, Common.TILE_SIZE, Common.TILE_SIZE, null);
                             }
                         }
+                    }
                     }
                 }
             }

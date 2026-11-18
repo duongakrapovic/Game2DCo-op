@@ -29,9 +29,13 @@ public class GameData {
         public volatile boolean up = false;
         public volatile boolean down = false;
 
-        public PlayerState() {}
+        public PlayerState() {
+            this.x = Common.SPAWN_X;
+            this.y = Common.SPAWN_Y;
+        }
 
         public PlayerState(String id, String name) {
+            this();
             this.id = id;
             this.name = name;
         }
@@ -72,6 +76,7 @@ public class GameData {
         public long nextPathAt = 0;
         public int[][] currentPath = new int[0][2];
         public int pathIndex = 0;
+        public MonsterAI.PathfinderWorkspace pathfinderWorkspace;
 
         public MonsterState(String id, float x, float y) {
             this.id = id;
@@ -92,11 +97,17 @@ public class GameData {
      */
 
     public static class PlayerInput {
-        public int seq;
-        public boolean left, right, up, down;
-        public boolean attack;
+        public final int seq;
+        public final boolean left, right, up, down;
+        public final boolean attack;
+        public final int pingMs;
 
         public PlayerInput(int seq, boolean left, boolean right, boolean up, boolean down, boolean attack) {
+            this(seq, left, right, up, down, attack, 0);
+        }
+
+        public PlayerInput(int seq, boolean left, boolean right, boolean up, boolean down, boolean attack, int pingMs) {
+            this.pingMs = Math.max(0, Math.min(200, pingMs));
             this.seq = seq;
             this.left = left;
             this.right = right;

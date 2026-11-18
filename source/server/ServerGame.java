@@ -5,7 +5,9 @@ import source.common.GameData;
 import source.common.GameMap;
 import source.common.GamePhysics;
 import source.common.GameProtocol;
-import source.common.SaveManager;
+import source.common.CombatSystem;
+import source.common.MonsterAI;
+import java.util.concurrent.atomic.AtomicReference;
 
 import java.awt.Point;
 import java.awt.Rectangle;
@@ -32,7 +34,14 @@ public class ServerGame implements Runnable {
     private final Random random = new Random();
     private volatile boolean running = true;
     private final Thread loopThread;
-    private SaveManager.OnlineSaveData saveData;
+    private final RoomSaveManager saves;
+    private final Map<String, AtomicReference<GameData.PlayerInput>> inputBuffers = new ConcurrentHashMap<>();
+    private final CombatSystem.MonsterHistory history = new CombatSystem.MonsterHistory();
+    private long tick;
+    private boolean forceFullState = true;
+    private GameData.WorldSnapshot baseline;
+    private long baselineSequence;
+    private final long streamId = java.util.UUID.randomUUID().getMostSignificantBits();
     private long stateSequence = 0;
     private int saveTickCounter = 0;
 
@@ -43,13 +52,10 @@ public class ServerGame implements Runnable {
     public ServerGame(String roomId, ServerNetwork serverNetwork) {
         this.roomId = roomId;
         this.serverNetwork = serverNetwork;
-        this.saveData = SaveManager.loadOrCreateOnlineSave(roomId);
-
         this.mapManager = new GameMap();
-        String mapPath = "source/content/map";
-        mapManager.initTileset(256);
-        mapManager.loadTilesetProperties(mapPath + "/tileset.tsx");
-        mapManager.loadAllChunks(mapPath, Common.MAX_CHUNK_X, Common.MAX_CHUNK_Y);
+        mapManager.ensureCollisionMapLoaded();
+        mapManager.validatedPlayerSpawn(Common.SPAWN_X, Common.SPAWN_Y);
+        this.saves = new RoomSaveManager(roomId, mapManager);
 
         for (int i = 1; i <= MONSTER_COUNT; i++) {
             Point spawn = findRandomMapPoint();
@@ -61,119 +67,80 @@ public class ServerGame implements Runnable {
     }
 
     public String getRoomId() { return roomId; }
+    public long getStreamId() { return streamId; }
+    public synchronized void requestFullState() { forceFullState = true; }
     public Map<String, GameData.PlayerState> getPlayers() { return players; }
     public int getPlayerCount() { return players.size(); }
     public boolean isFull() { return players.size() >= Common.MAX_PLAYERS_PER_ROOM; }
     public boolean isEmpty() { return players.isEmpty(); }
 
-    public synchronized boolean addPlayer(
-            GameData.PlayerState player, ServerNetwork.ClientHandler handler) {
-        if (players.size() >= Common.MAX_PLAYERS_PER_ROOM || players.containsKey(player.id)) {
-            return false;
-        }
-
-        if (saveData != null) {
-            SaveManager.PlayerSlotData matchedSlot = null;
-            for (SaveManager.PlayerSlotData slot : saveData.slots) {
-                if (slot.playerName != null && slot.playerName.equalsIgnoreCase(player.name)) {
-                    matchedSlot = slot;
-                    break;
-                }
-            }
-
-            if (matchedSlot != null) {
-                matchedSlot.status = "ACTIVE";
-                if (matchedSlot.x > 0 || matchedSlot.y > 0) {
-                    player.x = matchedSlot.x;
-                    player.y = matchedSlot.y;
-                }
-                if (matchedSlot.hp > 0) {
-                    player.hp = matchedSlot.hp;
-                    player.maxHp = matchedSlot.maxHp;
-                }
-                SaveManager.saveOnline(saveData);
-            } else {
-                SaveManager.PlayerSlotData emptySlot = null;
-                for (SaveManager.PlayerSlotData slot : saveData.slots) {
-                    if ("EMPTY".equals(slot.status)) {
-                        emptySlot = slot;
-                        break;
-                    }
-                }
-                if (emptySlot == null) {
-                    return false;
-                }
-                emptySlot.status = "ACTIVE";
-                emptySlot.playerName = player.name;
-                emptySlot.x = player.x;
-                emptySlot.y = player.y;
-                emptySlot.hp = player.hp;
-                emptySlot.maxHp = player.maxHp;
-                SaveManager.saveOnline(saveData);
-            }
-        }
-
+    public synchronized boolean addPlayer(GameData.PlayerState player, ServerNetwork.ClientHandler handler) {
+        if (!running) throw new IllegalStateException("Phong da dung. Hay lam moi danh sach phong.");
+        if (players.containsKey(player.id)) throw new IllegalStateException("Ban da o trong phong nay.");
+        if (isFull()) return false;
+        saves.join(player);
         players.put(player.id, player);
+        inputBuffers.put(player.id, new AtomicReference<>());
         lastAcks.put(player.id, -1);
         attackInputs.put(player.id, false);
         previousAttackInputs.put(player.id, false);
-        if (handler != null) {
-            clientHandlers.put(player.id, handler);
-        }
+        if (handler != null) clientHandlers.put(player.id, handler);
+        forceFullState = true;
         return true;
     }
 
-    public void updatePlayerHandler(String playerId, ServerNetwork.ClientHandler handler) {
+    public synchronized void updatePlayerHandler(String playerId, ServerNetwork.ClientHandler handler) {
         if (handler != null && players.containsKey(playerId)) {
+            GameData.PlayerState player = players.get(playerId);
+            java.awt.geom.Point2D.Float spawn = mapManager.validatedPlayerSpawn(player.x, player.y);
+            player.x = spawn.x; player.y = spawn.y;
             clientHandlers.put(playerId, handler);
+            saves.attach(playerId);
+            forceFullState = true;
         }
     }
 
     public synchronized void detachPlayerHandler(String playerId, ServerNetwork.ClientHandler handler) {
-        clientHandlers.remove(playerId, handler);
+        if (!clientHandlers.remove(playerId, handler)) return;
         GameData.PlayerState player = players.get(playerId);
-        if (player != null) {
-            player.left = false;
-            player.right = false;
-            player.up = false;
-            player.down = false;
-            if (saveData != null) {
-                for (SaveManager.PlayerSlotData slot : saveData.slots) {
-                    if (slot.playerName != null && slot.playerName.equalsIgnoreCase(player.name)) {
-                        slot.x = player.x;
-                        slot.y = player.y;
-                        slot.hp = player.hp;
-                        slot.maxHp = player.maxHp;
-                        slot.status = "DISCONNECTED";
-                        break;
-                    }
-                }
-                SaveManager.saveOnline(saveData);
-            }
-        }
+        if (player == null) return;
+        AtomicReference<GameData.PlayerInput> buffer = inputBuffers.get(playerId);
+        if (buffer != null) buffer.set(null);
+        player.left = player.right = player.up = player.down = false;
         attackInputs.put(playerId, false);
         previousAttackInputs.put(playerId, false);
+        saves.detach(player, false);
     }
 
     public synchronized void removePlayer(String playerId) {
         GameData.PlayerState player = players.remove(playerId);
         clientHandlers.remove(playerId);
+        inputBuffers.remove(playerId);
         lastAcks.remove(playerId);
         attackInputs.remove(playerId);
         previousAttackInputs.remove(playerId);
-        if (player != null && saveData != null) {
-            for (SaveManager.PlayerSlotData slot : saveData.slots) {
-                if (slot.playerName != null && slot.playerName.equalsIgnoreCase(player.name)) {
-                    slot.x = player.x;
-                    slot.y = player.y;
-                    slot.hp = player.hp;
-                    slot.maxHp = player.maxHp;
-                    slot.status = "DISCONNECTED";
-                    break;
-                }
-            }
-            SaveManager.saveOnline(saveData);
-        }
+        if (player != null) saves.detach(player, true);
+        forceFullState = true;
+    }
+
+    public synchronized void bufferPlayerInput(String playerId, GameData.PlayerInput input) {
+        AtomicReference<GameData.PlayerInput> buffer = inputBuffers.get(playerId);
+        if (buffer == null || !clientHandlers.containsKey(playerId)) return;
+        GameData.PlayerInput previous = buffer.get();
+        if (input.seq <= lastAcks.getOrDefault(playerId, -1)
+                || (previous != null && input.seq <= previous.seq)) return;
+        buffer.set(input);
+    }
+
+    private void applyBufferedInput(GameData.PlayerState player) {
+        AtomicReference<GameData.PlayerInput> buffer = inputBuffers.get(player.id);
+        GameData.PlayerInput input = buffer == null ? null : buffer.get();
+        if (input == null) return;
+        player.left = input.left; player.right = input.right;
+        player.up = input.up; player.down = input.down;
+        player.pingMs = input.pingMs;
+        updateAck(player.id, input.seq);
+        updateAttackInput(player.id, input.attack);
     }
 
     public void updateAck(String playerId, int sequence) {
@@ -190,8 +157,12 @@ public class ServerGame implements Runnable {
     }
 
     public void stop() {
-        running = false;
+        synchronized (this) { running = false; }
         loopThread.interrupt();
+        if (Thread.currentThread() != loopThread) {
+            try { loopThread.join(2000); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
         syncAndSaveOnline();
     }
 
@@ -199,20 +170,22 @@ public class ServerGame implements Runnable {
     public void run() {
         long nextTick = System.nanoTime();
         while (running) {
-            for (GameData.PlayerState player : players.values()) {
-                updatePlayerAttack(player);
-                GamePhysics.updatePlayer(player, mapManager);
-                if (player.hp <= 0) {
-                    player.respawn();
+            synchronized (this) {
+                if (!running) break;
+                history.record(monsters.values(), tick);
+                for (GameData.PlayerState player : players.values()) {
+                    applyBufferedInput(player);
+                    updatePlayerAttack(player);
+                    GamePhysics.updatePlayer(player, mapManager);
+                    if (player.hp <= 0) player.respawn();
                 }
-            }
-
-            updateMonsters();
-            broadcastUdpState();
-
-            if (++saveTickCounter >= 900) {
-                saveTickCounter = 0;
-                syncAndSaveOnline();
+                updateMonsters();
+                broadcastUdpState();
+                tick++;
+                if (++saveTickCounter >= 900) {
+                    saveTickCounter = 0;
+                    syncAndSaveOnline();
+                }
             }
 
             nextTick += Common.TICK_NS;
@@ -233,27 +206,9 @@ public class ServerGame implements Runnable {
 
     private void updatePlayerAttack(GameData.PlayerState player) {
         boolean pressed = attackInputs.getOrDefault(player.id, false);
-        boolean previouslyPressed = previousAttackInputs.getOrDefault(player.id, false);
-        if (pressed && !previouslyPressed && !player.isAttacking) {
-            player.isAttacking = true;
-            player.attackTicks = 0;
-            long now = System.currentTimeMillis();
-            Rectangle attackHitbox = GamePhysics.getAttackHitbox(
-                    player.x, player.y, player.direction);
-            for (GameData.MonsterState monster : monsters.values()) {
-                if (!monster.isDead && attackHitbox.intersects(
-                        GamePhysics.getEntityBounds(monster.x, monster.y))) {
-                    monster.hp = Math.max(0, monster.hp - 15);
-                    monster.flashUntil = now + 150;
-                    GamePhysics.applyKnockback(monster, player.x, player.y, 16.0f, mapManager);
-                    if (monster.hp == 0) {
-                        monster.isDead = true;
-                        monster.respawnTimer = randomRespawnTicks();
-                        monster.currentPath = new int[0][2];
-                        monster.pathIndex = 0;
-                    }
-                }
-            }
+        if (pressed && !previousAttackInputs.getOrDefault(player.id, false) && !player.isAttacking) {
+            CombatSystem.resolveAttack(player, monsters.values(), mapManager,
+                    this::randomRespawnTicks, history, tick);
         }
         previousAttackInputs.put(player.id, pressed);
     }
@@ -263,6 +218,7 @@ public class ServerGame implements Runnable {
             if (monster.isDead) {
                 if (--monster.respawnTimer <= 0) {
                     Point spawn = findRandomMapPoint();
+                    history.clear(monster.id);
                     monster.x = spawn.x;
                     monster.y = spawn.y;
                     monster.hp = monster.maxHp;
@@ -277,7 +233,7 @@ public class ServerGame implements Runnable {
 
             GameData.PlayerState target = findNearestPlayer(monster);
             if (target != null) {
-                GamePhysics.updateMonster(monster, target, mapManager);
+                MonsterAI.updateMonster(monster, target, mapManager);
             }
         }
     }
@@ -335,12 +291,7 @@ public class ServerGame implements Runnable {
     }
 
     private boolean isWalkable(int x, int y) {
-        int right = x + GamePhysics.ENTITY_SIZE - 1;
-        int bottom = y + GamePhysics.ENTITY_SIZE - 1;
-        return !mapManager.isCollisionAtWorld(x + 2, y + 2)
-                && !mapManager.isCollisionAtWorld(right - 2, y + 2)
-                && !mapManager.isCollisionAtWorld(x + 2, bottom - 2)
-                && !mapManager.isCollisionAtWorld(right - 2, bottom - 2);
+        return mapManager.isWalkable(x, y);
     }
 
     private int randomRespawnTicks() {
@@ -349,42 +300,28 @@ public class ServerGame implements Runnable {
     }
 
     private void broadcastUdpState() {
-        if (players.isEmpty() || serverNetwork == null) {
-            return;
-        }
-
+        if (players.isEmpty() || serverNetwork == null) return;
         GameData.WorldSnapshot snapshot = new GameData.WorldSnapshot();
         for (GameData.PlayerState player : players.values()) {
             player.lastAckSeq = lastAcks.getOrDefault(player.id, -1);
             snapshot.players.add(player);
         }
         snapshot.monsters.addAll(monsters.values());
-
         stateSequence++;
-        String payload = stateSequence + "|" + GameProtocol.serializeSnapshot(snapshot);
-        byte[] packetData = GameProtocol.createGameUdpPacket(Common.UDP_GAME_STATE, payload);
-
+        boolean full = forceFullState || baseline == null || stateSequence % 60 == 0;
+        if (full) baselineSequence = stateSequence;
+        java.util.List<byte[]> packets = GameProtocol.serializeSnapshotBinary(
+                stateSequence, streamId, baselineSequence, snapshot, full ? null : baseline);
+        if (full) {
+            baseline = GameProtocol.copySnapshot(snapshot);
+            forceFullState = false;
+        }
         for (String playerId : players.keySet()) {
-            serverNetwork.sendGameUdpPacket(playerId, packetData);
+            for (byte[] packet : packets) serverNetwork.sendGameUdpPacket(playerId, packet);
         }
     }
 
     private synchronized void syncAndSaveOnline() {
-        if (saveData == null) {
-            return;
-        }
-        for (GameData.PlayerState player : players.values()) {
-            for (SaveManager.PlayerSlotData slot : saveData.slots) {
-                if (slot.playerName != null && slot.playerName.equalsIgnoreCase(player.name)) {
-                    slot.x = player.x;
-                    slot.y = player.y;
-                    slot.hp = player.hp;
-                    slot.maxHp = player.maxHp;
-                    slot.status = "ACTIVE";
-                    break;
-                }
-            }
-        }
-        SaveManager.saveOnline(saveData);
+        saves.syncAndSaveOnline(players.values());
     }
 }

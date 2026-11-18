@@ -52,6 +52,7 @@ public class ClientMovement {
     public synchronized PredictionInput step(boolean l, boolean r, boolean u, boolean d, boolean atk) {
         PredictionInput input = new PredictionInput(nextSeq++, l, r, u, d, atk);
         if (predictionEnabled) {
+            if (pendingInputs.size() >= 600) pendingInputs.poll();
             pendingInputs.add(input);
             localPlayer.left = l;
             localPlayer.right = r;
@@ -87,7 +88,7 @@ public class ClientMovement {
         }
     }
 
-    public void addSnap(String id, float x, float y, String dir, int sprite) {
+    public synchronized void addSnap(String id, float x, float y, String dir, int sprite) {
         long now = System.currentTimeMillis();
         List<Snap> list = playerSnaps.computeIfAbsent(id, k -> new ArrayList<>());
         list.add(new Snap(now, x, y, dir, sprite));
@@ -119,11 +120,17 @@ public class ClientMovement {
                 return new Snap(renderTime, rx, ry, s1.direction, s1.spriteNum);
             }
         }
-        return list.get(list.size() - 1);
+        return renderTime < list.get(0).timestamp ? list.get(0) : list.get(list.size() - 1);
     }
 
-    public float x() { return localPlayer.x; }
-    public float y() { return localPlayer.y; }
+    public synchronized void reset() {
+        pendingInputs.clear(); playerSnaps.clear();
+        localPlayer.respawn(); nextSeq = 0;
+    }
+    public synchronized void retainPlayers(Set<String> ids) { playerSnaps.keySet().retainAll(ids); }
+
+    public synchronized float x() { return localPlayer.x; }
+    public synchronized float y() { return localPlayer.y; }
     public int pendingCount() { return pendingInputs.size(); }
     public float maxError() { return maxErrorObserved; }
     public int correctionCount() { return correctionCount; }

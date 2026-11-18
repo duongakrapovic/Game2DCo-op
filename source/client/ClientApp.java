@@ -10,6 +10,9 @@ import java.awt.event.*;
 
 public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
+    private String initialMapError;
+    private final JLabel lobbyStatus = new JLabel("Chua ket noi Server");
+    private long connectionGeneration;
     private String myName = "Player_" + (int)(Math.random() * 100);
     private final GameMap mapManager;
     private final ClientGame gamePanel;
@@ -27,6 +30,9 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     private JTextField txtPlayerNameLobby;
     private JTextField txtServerIp;
     private volatile String pendingRoomCommand;
+    private boolean awaitingLeave;
+    private boolean roomCommandInFlight;
+    private boolean onlineInRoom;
 
     public ClientApp() {
         setTitle("Dungeon Co-op Game");
@@ -36,9 +42,12 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
         String mapPath = "source/content/map";
         mapManager = new GameMap();
-        mapManager.loadTilesetImage(mapPath + "/tileset.png", Common.ORIGINAL_TILE_SIZE);
-        mapManager.loadTilesetProperties(mapPath + "/tileset.tsx");
-        mapManager.loadAllChunks(mapPath, Common.MAX_CHUNK_X, Common.MAX_CHUNK_Y);
+        try {
+            mapManager.ensureCollisionMapLoaded();
+            mapManager.loadTilesetImage(mapPath + "/tileset.png", Common.ORIGINAL_TILE_SIZE);
+        } catch (IllegalStateException error) {
+            initialMapError = "Map error: " + error.getMessage();
+        }
 
         movement = new ClientMovement(mapManager);
         gamePanel = new ClientGame(mapManager, movement);
@@ -97,11 +106,21 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             if (netClient != null) netClient.close();
             setTitle("Dungeon Co-op [OFFLINE]");
             gamePanel.setCurrentRoomName("OFFLINE");
-            gamePanel.startOfflineMode(myName);
-            switchToGameScene();
+            try {
+                gamePanel.startOfflineMode(myName);
+                switchToGameScene();
+            } catch (IllegalStateException error) {
+                lobbyStatus.setText(error.getMessage());
+                JOptionPane.showMessageDialog(this, error.getMessage());
+            }
         });
 
-        btnOnline.addActionListener(e -> cardLayout.show(mainContainer, "LOBBY"));
+        btnOnline.addActionListener(e -> {
+            cardLayout.show(mainContainer, "LOBBY");
+            roomListModel.clear();
+            if (netClient != null && netClient.isReady()) netClient.send(Common.CMD_ROOM_LIST);
+            else lobbyStatus.setText("Chua ket noi Server");
+        });
         btnExit.addActionListener(e -> System.exit(0));
         return panel;
     }
@@ -138,7 +157,13 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         JButton btnConnect = new JButton("Kết nối Server");
         btnConnect.addActionListener(e -> connectToServer());
         topBar.add(btnConnect);
-        panel.add(topBar, BorderLayout.NORTH);
+        JPanel header = new JPanel(new BorderLayout(0, 6));
+        header.setOpaque(false);
+        header.add(topBar, BorderLayout.NORTH);
+        lobbyStatus.setForeground(Color.WHITE);
+        if (initialMapError != null) lobbyStatus.setText(initialMapError);
+        header.add(lobbyStatus, BorderLayout.SOUTH);
+        panel.add(header, BorderLayout.NORTH);
 
         JPanel centerSplit = new JPanel(new GridLayout(1, 2, 20, 0));
         centerSplit.setOpaque(false);
@@ -189,9 +214,28 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
     private void connectToServer() {
         String ip = txtServerIp.getText().trim();
+        if (ip.isEmpty()) { lobbyStatus.setText("Hay nhap IP Server"); return; }
         stopVoiceChat();
+        awaitingLeave = false;
+        roomCommandInFlight = false;
+        onlineInRoom = false;
+        final long generation = ++connectionGeneration;
         if (netClient != null) netClient.close();
-        netClient = new ClientNetwork(ip, Common.TCP_PORT, this);
+        ClientNetwork.Listener callbacks = new ClientNetwork.Listener() {
+            private void onEdt(Runnable action) {
+                SwingUtilities.invokeLater(() -> { if (generation == connectionGeneration) action.run(); });
+            }
+            public void onMessage(String message) { onEdt(() -> ClientApp.this.onMessage(message)); }
+            public void onStateChanged(ClientNetwork.State state, String info) {
+                onEdt(() -> ClientApp.this.onStateChanged(state, info));
+            }
+            public void onSessionLost(String reason) { onEdt(() -> ClientApp.this.onSessionLost(reason)); }
+            public void onSnapshot(source.common.GameData.WorldSnapshot snapshot) {
+                onEdt(() -> ClientApp.this.onSnapshot(snapshot));
+            }
+        };
+        netClient = new ClientNetwork(ip, Common.TCP_PORT, callbacks);
+        lobbyStatus.setText("Dang ket noi...");
         netClient.connect();
     }
 
@@ -204,7 +248,7 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
     private void joinSelectedRoom() {
         String selected = roomJList.getSelectedValue();
-        if (selected == null) return;
+        if (selected == null) { lobbyStatus.setText("Hay chon phong de vao"); return; }
         String pName = GameProtocol.sanitizeName(txtPlayerNameLobby.getText().trim());
         if (!pName.isEmpty()) myName = pName;
         String roomName = selectedRoomName(selected);
@@ -217,9 +261,13 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     }
 
     private void sendRoomCommand(String command) {
+        if (awaitingLeave) { pendingRoomCommand = command; return; }
+        if (roomCommandInFlight) { lobbyStatus.setText("Dang xu ly yeu cau vao phong..."); return; }
         ClientNetwork client = netClient;
-        if (client != null && client.getState() == ClientNetwork.State.CONNECTED) {
+        if (client != null && client.isReady()) {
             pendingRoomCommand = null;
+            roomCommandInFlight = true;
+            lobbyStatus.setText("Dang xu ly yeu cau vao phong...");
             client.send(command);
         } else {
             pendingRoomCommand = command;
@@ -232,8 +280,10 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
     private void sendPendingRoomCommand() {
         String command = pendingRoomCommand;
         ClientNetwork client = netClient;
-        if (command != null && client != null && client.getState() == ClientNetwork.State.CONNECTED) {
+        if (!awaitingLeave && !roomCommandInFlight && command != null && client != null && client.isReady()) {
             pendingRoomCommand = null;
+            roomCommandInFlight = true;
+            lobbyStatus.setText("Dang xu ly yeu cau vao phong...");
             client.send(command);
         }
     }
@@ -298,7 +348,18 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
                 if (JOptionPane.showConfirmDialog(ClientApp.this, "Về Menu chính?", "Thoát", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
                     gamePanel.stopOfflineMode();
                     stopVoiceChat();
-                    if (netClient != null) netClient.close();
+                    pendingRoomCommand = null;
+                    roomCommandInFlight = false;
+                    onlineInRoom = false;
+                    gamePanel.left = gamePanel.right = gamePanel.up = gamePanel.down = gamePanel.attack = false;
+                    roomListModel.clear();
+                    if (netClient != null && netClient.isReady()) {
+                        awaitingLeave = true;
+                        netClient.send(Common.CMD_LEAVE_ROOM);
+                    } else {
+                        awaitingLeave = false;
+                        if (netClient != null) netClient.close();
+                    }
                     cardLayout.show(mainContainer, "MENU");
                 }
             }
@@ -312,10 +373,6 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
 
     public void sendAttackInput(boolean pressed) {
         gamePanel.attack = pressed;
-        if (netClient != null && netClient.getState() == ClientNetwork.State.CONNECTED) {
-            ClientMovement.PredictionInput input = movement.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down, pressed);
-            netClient.sendGameInputUdp(input.seq + ":" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.attack);
-        }
     }
 
     private void updateKey(String dir, boolean pressed) {
@@ -326,40 +383,80 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
             case "down": gamePanel.down = pressed; break;
         }
 
-        if (netClient != null && netClient.getState() == ClientNetwork.State.CONNECTED) {
-            ClientMovement.PredictionInput input = movement.step(gamePanel.left, gamePanel.right, gamePanel.up, gamePanel.down, gamePanel.attack);
-            netClient.sendGameInputUdp(input.seq + ":" + input.left + ":" + input.right + ":" + input.up + ":" + input.down + ":" + input.attack);
-        }
+    }
+
+    public void sendFrameInput() {
+        ClientNetwork client = netClient;
+        if (!onlineInRoom || client == null || !client.isGameplayActive()) return;
+        ClientMovement.PredictionInput input = movement.step(gamePanel.left, gamePanel.right,
+                gamePanel.up, gamePanel.down, gamePanel.attack);
+        client.sendGameInputUdp(input.seq + ":" + input.left + ":" + input.right + ":"
+                + input.up + ":" + input.down + ":" + input.attack);
     }
 
     @Override
     public void onMessage(String line) {
-        if (line.startsWith(Common.CMD_ROOM_LIST)) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> onMessage(line));
+            return;
+        }
+        if (line.startsWith(Common.CMD_WELCOME + ":")) {
+            if (netClient != null && netClient.isReady()) {
+                netClient.send(Common.CMD_ROOM_LIST);
+                sendPendingRoomCommand();
+                lobbyStatus.setText("Da ket noi Server");
+            }
+        } else if (line.startsWith(Common.CMD_ROOM_LIST)) {
             String[] items = line.split(";");
             SwingUtilities.invokeLater(() -> {
                 roomListModel.clear();
                 for (int i = 1; i < items.length; i++) roomListModel.addElement(items[i]);
             });
         } else if (line.startsWith(Common.CMD_JOINED + ":")) {
+            roomCommandInFlight = false;
+            if (awaitingLeave) return;
             String rName = line.substring((Common.CMD_JOINED + ":").length()).trim();
-            gamePanel.setCurrentRoomName(rName);
-            SwingUtilities.invokeLater(this::switchToGameScene);
-            SwingUtilities.invokeLater(this::startVoiceChat);
+            SwingUtilities.invokeLater(() -> {
+                if (awaitingLeave) return;
+                gamePanel.stopOfflineMode();
+                movement.reset();
+                gamePanel.setCurrentRoomName(rName);
+                enterOnlineGame();
+            });
         } else if (line.startsWith("RESUMED:")) {
             String rName = line.substring("RESUMED:".length()).trim();
-            gamePanel.setCurrentRoomName(rName);
-            SwingUtilities.invokeLater(this::startVoiceChat);
+            SwingUtilities.invokeLater(() -> {
+                gamePanel.setCurrentRoomName(rName); enterOnlineGame(); sendPendingRoomCommand();
+            });
         } else if ("LEFT".equals(line)) {
-            gamePanel.setCurrentRoomName("");
-            SwingUtilities.invokeLater(this::stopVoiceChat);
+            awaitingLeave = false;
+            onlineInRoom = false;
+            gamePanel.setCurrentRoomName(""); stopVoiceChat();
+            lobbyStatus.setText("Da roi phong");
+            sendPendingRoomCommand();
         } else if (line.startsWith(Common.CMD_STATE)) {
-            gamePanel.updateOnlineWorld(line, myName);
+            final source.common.GameData.WorldSnapshot snapshot = source.common.GameProtocol.parseSnapshot(line);
+            SwingUtilities.invokeLater(() -> gamePanel.applySnapshot(snapshot, myName));
         } else if (line.startsWith(Common.CMD_ERROR)) {
+            roomCommandInFlight = false;
             pendingRoomCommand = null;
             String[] parts = line.split(":", 2);
             String message = parts.length > 1 ? parts[1] : "Lỗi từ server.";
-            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, message));
+            lobbyStatus.setText(message);
+            cardLayout.show(mainContainer, "LOBBY");
         }
+    }
+
+    @Override
+    public void onSnapshot(source.common.GameData.WorldSnapshot snapshot) {
+        final String name = myName;
+        ClientNetwork client = netClient;
+        if (client == null) return;
+        final long generation = client.getGameplayGeneration();
+        SwingUtilities.invokeLater(() -> {
+            if (netClient == client && client.isGameplayActive()
+                    && client.getGameplayGeneration() == generation) gamePanel.applySnapshot(snapshot, name);
+        });
     }
 
     private void startVoiceChat() {
@@ -391,18 +488,44 @@ public class ClientApp extends JFrame implements ClientNetwork.Listener {
         gamePanel.setVoiceStatus("");
     }
 
+    private void enterOnlineGame() {
+        try {
+            mapManager.ensureCollisionMapLoaded();
+            onlineInRoom = true;
+            roomCommandInFlight = false;
+            lobbyStatus.setText("Da vao phong: " + gamePanel.currentRoomName);
+            switchToGameScene();
+            if (netClient != null) netClient.requestGameUdpRegistration();
+            startVoiceChat();
+        } catch (IllegalStateException error) {
+            lobbyStatus.setText("Map error: " + error.getMessage());
+            if (netClient != null) netClient.send(Common.CMD_LEAVE_ROOM);
+            cardLayout.show(mainContainer, "LOBBY");
+        }
+    }
+
     @Override
-    public void onStateChanged(ClientNetwork.State s, String info) {
-        if (s == ClientNetwork.State.CONNECTED) sendPendingRoomCommand();
-        SwingUtilities.invokeLater(() -> gamePanel.setBannerMessage(
-                s == ClientNetwork.State.RECONNECTING ? info : null));
+    public void onStateChanged(ClientNetwork.State state, String info) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> onStateChanged(state, info)); return;
+        }
+        lobbyStatus.setText(info);
+        gamePanel.setBannerMessage(state == ClientNetwork.State.RECONNECTING ? info : null);
+        // Pending lobby commands are released by WELCOME or RESUMED, never TCP connect alone.
     }
 
     @Override
     public void onSessionLost(String reason) {
-        pendingRoomCommand = null;
-        SwingUtilities.invokeLater(this::stopVoiceChat);
-        SwingUtilities.invokeLater(() -> cardLayout.show(mainContainer, "MENU"));
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> onSessionLost(reason)); return;
+        }
+        stopVoiceChat();
+        awaitingLeave = false;
+        roomCommandInFlight = false;
+        onlineInRoom = false;
+        lobbyStatus.setText(reason);
+        cardLayout.show(mainContainer, "LOBBY");
+        if (pendingRoomCommand != null) connectToServer();
     }
 
     public static void main(String[] args) {

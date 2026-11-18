@@ -22,6 +22,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -138,7 +140,7 @@ public class ServerNetwork {
         }
     }
 
-    public synchronized void stop() {
+    public void stop() {
         running = false;
         ServerSocket listener = serverSocket;
         if (listener != null) {
@@ -148,12 +150,6 @@ public class ServerNetwork {
                 System.err.println("[ServerNetwork] Loi dong ServerSocket: " + e.getMessage());
             }
         }
-        DatagramSocket datagramListener = udpSocket;
-        udpSocket = null;
-        if (datagramListener != null) {
-            datagramListener.close();
-        }
-
         for (ClientHandler client : connectedClients) {
             client.close();
         }
@@ -170,6 +166,19 @@ public class ServerNetwork {
 
         voiceUdpPool.shutdownNow();
         gameUdpPool.shutdownNow();
+        try {
+            voiceUdpPool.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        try {
+            gameUdpPool.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        DatagramSocket datagramListener = udpSocket;
+        udpSocket = null;
+        if (datagramListener != null) {
+            datagramListener.close();
+        }
+
+
 
         voicePlayersByAddress.clear();
         voicePeersByPlayer.clear();
@@ -206,6 +215,8 @@ public class ServerNetwork {
                 } else if (GameProtocol.isGameUdpPacket(data, data.length)) {
                     gameUdpPool.execute(() -> handleGamePacket(data, clientAddress));
                 }
+            } catch (RejectedExecutionException e) {
+                if (!running) return;
             } catch (SocketException e) {
                 if (running) {
                     System.err.println("[ServerNetwork] Loi UDP socket: " + e.getMessage());
@@ -244,16 +255,26 @@ public class ServerNetwork {
         if (token == null || token.isEmpty()) {
             return;
         }
-        ServerSession session = app.getSessionByToken(token.trim());
+        String[] registration = token.split("\\|", -1);
+        if (registration.length != 2 || registration[1].length() > 20) return;
+        try { Long.parseLong(registration[1]); }
+        catch (NumberFormatException invalidGeneration) { return; }
+        ServerSession session = app.getSessionByToken(registration[0].trim());
         if (session == null) {
             return;
         }
 
         String playerId = session.getPlayerId();
-        gamePeersByPlayer.put(playerId, address);
+        SocketAddress previous = gamePeersByPlayer.put(playerId, address);
+        if (previous != null) gamePlayersByAddress.remove(previous, playerId);
         gamePlayersByAddress.put(address, playerId);
 
-        sendUdpRaw(GameProtocol.createGameUdpPacket(Common.UDP_GAME_ACK, playerId), address);
+        String acknowledgement = playerId + "|";
+        ServerGame room = session.getRoomId() == null ? null : app.getRoom(session.getRoomId());
+        if (room != null) acknowledgement += room.getStreamId();
+        acknowledgement += "|" + registration[1];
+        sendUdpRaw(GameProtocol.createGameUdpPacket(Common.UDP_GAME_ACK, acknowledgement), address);
+        if (room != null) room.requestFullState();
     }
 
     private void handleGameInput(String payload, SocketAddress address) {
@@ -292,14 +313,8 @@ public class ServerNetwork {
             boolean attack = parts.length >= 6 && Boolean.parseBoolean(parts[5]);
             int pingMs = parts.length >= 7 ? Integer.parseInt(parts[6]) : 0;
 
-            player.left = left;
-            player.right = right;
-            player.up = up;
-            player.down = down;
-            player.pingMs = pingMs;
-
-            room.updateAck(playerId, seq);
-            room.updateAttackInput(playerId, attack);
+            room.bufferPlayerInput(playerId,
+                    new GameData.PlayerInput(seq, left, right, up, down, attack, pingMs));
         } catch (Exception ignored) {}
     }
 
@@ -495,7 +510,12 @@ public class ServerNetwork {
                 String line;
                 while ((line = GameProtocol.readLineLimited(
                         in, GameProtocol.MAX_LINE_LENGTH_CLIENT)) != null) {
-                    handleCommand(line.trim());
+                    try {
+                        handleCommand(line.trim());
+                    } catch (IllegalStateException | IllegalArgumentException error) {
+                        System.err.println("[ServerNetwork] Command failed: " + error.getMessage());
+                        send(Common.CMD_ERROR + ":Khong the vao phong: " + error.getMessage());
+                    }
                 }
             } catch (IOException e) {
                 if (!socket.isClosed()) {
@@ -504,7 +524,7 @@ public class ServerNetwork {
             } finally {
                 connectedClients.remove(this);
                 removeVoicePeer(this);
-                removeGamePeer(playerId);
+                if (session == null || session.getClientHandler() == this) removeGamePeer(playerId);
                 if (currentRoom != null) {
                     currentRoom.detachPlayerHandler(playerId, this);
                     currentRoom = null;
@@ -571,10 +591,15 @@ public class ServerNetwork {
                 send(Common.CMD_ERROR + ":Phong da ton tai!");
                 return;
             }
-            if (!room.addPlayer(new GameData.PlayerState(playerId, playerName), this)) {
+            try {
+                if (!room.addPlayer(new GameData.PlayerState(playerId, playerName), this)) {
+                    app.removeRoom(roomName);
+                    send(Common.CMD_ERROR + ":Phong da day (4/4 nguoi)!");
+                    return;
+                }
+            } catch (IllegalStateException | IllegalArgumentException error) {
                 app.removeRoom(roomName);
-                send(Common.CMD_ERROR + ":Phong da day!");
-                return;
+                throw error;
             }
 
             currentRoom = room;
@@ -598,9 +623,13 @@ public class ServerNetwork {
                 return;
             }
 
+            if (currentRoom == room && room.getPlayers().containsKey(playerId)) {
+                send("RESUMED:" + roomName);
+                return;
+            }
             leaveCurrentRoomIfAny();
             if (!room.addPlayer(new GameData.PlayerState(playerId, playerName), this)) {
-                send(Common.CMD_ERROR + ":Phong da day!");
+                send(Common.CMD_ERROR + ":Phong da day (4/4 nguoi)!");
                 return;
             }
 

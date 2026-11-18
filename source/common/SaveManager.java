@@ -117,6 +117,24 @@ public class SaveManager {
         }
     }
 
+    public static OfflineSaveData loadOfflineSave(GameMap map) {
+        OfflineSaveData data = loadOfflineSave();
+        if (data == null) data = new OfflineSaveData();
+        java.awt.geom.Point2D.Float spawn = map.validatedPlayerSpawn(data.x, data.y);
+        data.x = spawn.x; data.y = spawn.y;
+        return data;
+    }
+
+    public static OnlineSaveData loadOrCreateOnlineSave(String roomName, GameMap map) {
+        OnlineSaveData data = loadOrCreateOnlineSave(roomName);
+        for (PlayerSlotData slot : data.slots) {
+            if ("EMPTY".equals(slot.status)) continue;
+            java.awt.geom.Point2D.Float spawn = map.validatedPlayerSpawn(slot.x, slot.y);
+            slot.x = spawn.x; slot.y = spawn.y;
+        }
+        return data;
+    }
+
     public static synchronized OfflineSaveData loadOfflineSave() {
         Path file = SAVES_DIR.resolve("offline_save.json");
         if (!Files.exists(file)) {

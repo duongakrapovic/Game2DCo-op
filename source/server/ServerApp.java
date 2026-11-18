@@ -18,6 +18,7 @@ public class ServerApp {
     private static final long RECONNECT_GRACE_SECONDS = 20;
 
     private final Map<String, ServerGame> rooms = new ConcurrentHashMap<>();
+    private final Map<String, ServerSession> sessionsByPlayerId = new ConcurrentHashMap<>();
     private final Map<String, ServerSession> sessionsByToken = new ConcurrentHashMap<>();
     private final Map<String, ScheduledFuture<?>> sessionExpirations = new ConcurrentHashMap<>();
     private final ScheduledExecutorService sessionScheduler =
@@ -76,6 +77,7 @@ public class ServerApp {
         }
         rooms.clear();
         sessionsByToken.clear();
+        sessionsByPlayerId.clear();
         for (ScheduledFuture<?> expiration : sessionExpirations.values()) {
             expiration.cancel(false);
         }
@@ -103,6 +105,7 @@ public class ServerApp {
         String token = UUID.randomUUID().toString().replace("-", "");
         ServerSession session = new ServerSession(playerId, token, playerName);
         sessionsByToken.put(token, session);
+        sessionsByPlayerId.put(playerId, session);
         return session;
     }
 
@@ -111,13 +114,7 @@ public class ServerApp {
     }
 
     public ServerSession getSessionByPlayerId(String playerId) {
-        if (playerId == null) return null;
-        for (ServerSession session : sessionsByToken.values()) {
-            if (playerId.equals(session.getPlayerId())) {
-                return session;
-            }
-        }
-        return null;
+        return playerId == null ? null : sessionsByPlayerId.get(playerId);
     }
 
     public ServerNetwork getServerNetwork() {
@@ -145,9 +142,10 @@ public class ServerApp {
             expiration.cancel(false);
         }
         if (temporarySession != null) {
-            sessionsByToken.put(temporarySession.getToken(), session);
+            removeSession(temporarySession);
         }
 
+        sessionsByPlayerId.put(session.getPlayerId(), session);
         session.setClientHandler(handler);
         session.touch();
         room.updatePlayerHandler(session.getPlayerId(), handler);
@@ -194,7 +192,8 @@ public class ServerApp {
     }
 
     private void removeSession(ServerSession session) {
-        sessionsByToken.entrySet().removeIf(entry -> entry.getValue() == session);
+        sessionsByToken.remove(session.getToken(), session);
+        sessionsByPlayerId.remove(session.getPlayerId(), session);
         ScheduledFuture<?> expiration = sessionExpirations.remove(session.getToken());
         if (expiration != null) {
             expiration.cancel(false);
