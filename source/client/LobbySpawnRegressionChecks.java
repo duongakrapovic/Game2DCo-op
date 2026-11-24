@@ -12,16 +12,44 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 
 /** Uses only synthetic XML and loopback sockets; never opens game assets or saves. */
+/*
+ * Kiểm map tổng hợp và handshake lobby thực tế trên loopback. Không đọc save thật hoặc tạo phòng game từ
+ * asset; một phần dùng ServerNetwork thật chỉ cho thao tác lobby.
+ * MemoryMap override openResource cung cấp TSX/TMX trong RAM; cờ broken làm thiếu chunk có chủ đích. Các
+ * latch/flag kiểm không gửi command trước WELCOME và phân biệt TCP ready với UDP active.
+ */
 public final class LobbySpawnRegressionChecks {
+    /*
+     * checks: Bộ đếm, tài nguyên nhân tạo hoặc cấu hình chỉ dùng trong kiểm thử.
+     */
     private static int checks;
+    /*
+     * check()
+     * Tăng bộ đếm điều kiện, nếu biểu thức false thì ném AssertionError với message để test dừng và chỉ ra
+     * điều kiện sai. Không thay dữ liệu game đang chơi.
+     */
     private static void check(boolean condition, String message) {
         checks++;
         if (!condition) throw new AssertionError(message);
     }
 
+    /*
+     * Map nhân tạo trong test; trả XML từ RAM để kiểm nhánh hợp lệ và lỗi.
+     */
     private static final class MemoryMap extends GameMap {
+        /*
+         * reads: Bộ đếm, tài nguyên nhân tạo hoặc cấu hình chỉ dùng trong kiểm thử.
+         */
         final List<String> reads = new ArrayList<>();
+        /*
+         * broken: Bộ đếm, tài nguyên nhân tạo hoặc cấu hình chỉ dùng trong kiểm thử.
+         */
         boolean broken;
+        /*
+         * openResource()
+         * MemoryMap ghi lại đường dẫn được đọc rồi trả XML TSX/TMX tổng hợp với tile/layer/firstgid có chủ
+         * đích. Khi broken bật thì tạo lỗi thiếu chunk để kiểm fail-closed; không mở file người dùng.
+         */
         @Override protected InputStream openResource(String path) throws IOException {
             reads.add(path);
             if (path.endsWith("tileset.tsx")) {
@@ -45,10 +73,20 @@ public final class LobbySpawnRegressionChecks {
         }
     }
 
+    /*
+     * stream()
+     * Chuyển chuỗi XML test thành ByteArrayInputStream UTF-8 để DOM parser dùng như tài nguyên thật.
+     */
     private static InputStream stream(String text) {
         return new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8));
     }
 
+    /*
+     * mapAndSpawns()
+     * Kiểm thứ tự properties trước chunk, nạp một lần, collision qua các layer/biên, full hitbox, tọa độ
+     * NaN/Infinity và spawn save sai. Gắn ảnh tile một pixel để đối chiếu draw với collision và camera qua
+     * chunk; map thiếu không biến thành đất đi được.
+     */
     private static void mapAndSpawns() throws Exception {
         MemoryMap map = new MemoryMap();
         check(map.isCollisionAtWorld(50, 50), "Unloaded map is blocked");
@@ -98,6 +136,12 @@ public final class LobbySpawnRegressionChecks {
         catch (IllegalStateException expected) { check(missing.isCollisionAtWorld(tile, tile), "Missing chunks do not become open ground"); }
     }
 
+    /*
+     * clientHandshake()
+     * Dùng TCP/UDP mock, giữ WELCOME một lúc để bảo đảm client chưa gửi lệnh sớm. Sau chào kiểm
+     * ROOM_LIST/CREATE_ROOM pending, JOINED, REGISTER tức thì và ACK đúng generation; khẳng định TCP ready
+     * khác gameplay UDP ready.
+     */
     private static void clientHandshake() throws Exception {
         CountDownLatch joined = new CountDownLatch(1), release = new CountDownLatch(1);
         AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -106,6 +150,10 @@ public final class LobbySpawnRegressionChecks {
         try (ServerSocket tcp = new ServerSocket(0, 4, InetAddress.getLoopbackAddress());
                 DatagramSocket udp = new DatagramSocket(tcp.getLocalPort(), InetAddress.getLoopbackAddress())) {
             tcp.setSoTimeout(5000); udp.setSoTimeout(5000);
+            /*
+             * Callback/lambda: Thân mock handshake: chưa WELCOME thì không được có lệnh client; sau đó
+             * kiểm ROOM_LIST, CREATE, REGISTER và phát ACK đúng generation.
+             */
             Thread mock = new Thread(() -> {
                 try (Socket socket = tcp.accept()) {
                     socket.setSoTimeout(200);
@@ -128,7 +176,16 @@ public final class LobbySpawnRegressionChecks {
                 } catch (Throwable error) { failure.set(error); joined.countDown(); }
             }, "Lobby-Handshake-Test");
             mock.setDaemon(true); mock.start();
+            /*
+             * Lớp ẩn cung cấp callback hoặc dữ liệu giả cho ngữ cảnh bao quanh; caller/hệ thống gọi các
+             * hàm override bên dưới.
+             */
             ClientNetwork client = new ClientNetwork(InetAddress.getLoopbackAddress().getHostAddress(), tcp.getLocalPort(), new ClientNetwork.Listener() {
+                /*
+                 * onMessage()
+                 * Listener test nhận WELCOME thì gửi ROOM_LIST và CREATE_ROOM theo thứ tự; nhận JOINED thì
+                 * đếm latch để thread chính tiếp tục kiểm ACK UDP.
+                 */
                 public void onMessage(String message) {
                     if (message.startsWith("WELCOME:")) {
                         reference.get().send(Common.CMD_ROOM_LIST);
@@ -136,9 +193,18 @@ public final class LobbySpawnRegressionChecks {
                     }
                     if (message.startsWith("JOINED:")) joined.countDown();
                 }
+                /*
+                 * onStateChanged()
+                 * Nếu state báo CONNECTED mà isReady vẫn false thì đánh dấu premature, phát hiện callback
+                 * sẵn sàng bị báo quá sớm.
+                 */
                 public void onStateChanged(ClientNetwork.State state, String info) {
                     if (state == ClientNetwork.State.CONNECTED && !reference.get().isReady()) premature.set(true);
                 }
+                /*
+                 * onSessionLost()
+                 * Lưu lỗi phiên ngoài kỳ vọng vào failure để handshake test thất bại với nguyên nhân rõ.
+                 */
                 public void onSessionLost(String reason) { failure.set(new AssertionError(reason)); }
             });
             reference.set(client); client.connect();
@@ -153,6 +219,11 @@ public final class LobbySpawnRegressionChecks {
         }
     }
 
+    /*
+     * actualServerLobby()
+     * Mở ServerNetwork thật ở port loopback tạm, kiểm WELCOME, ROOM_LIST, JOIN phòng không tồn tại,
+     * LEAVE/LEFT và UDP PING/PONG cùng số cổng. Không tạo ServerGame/save thật; finally shutdown app.
+     */
     private static void actualServerLobby() throws Exception {
         int port;
         try (ServerSocket reserved = new ServerSocket(0)) { port = reserved.getLocalPort(); }
@@ -180,6 +251,10 @@ public final class LobbySpawnRegressionChecks {
         } finally { app.shutdown(); }
     }
 
+    /*
+     * main()
+     * Chạy mapAndSpawns, clientHandshake và actualServerLobby rồi in số điều kiện đạt.
+     */
     public static void main(String[] args) throws Exception {
         mapAndSpawns(); clientHandshake(); actualServerLobby();
         System.out.println("PASS: " + checks + " lobby/spawn assertions");

@@ -1,23 +1,24 @@
-# MODULE COMMON – Mã dùng chung server & client
+# Module Common
 
----
+Model, giao thức và luật game chung cho server/client/offline. Cập nhật 19/11/2026 theo code 7fd270b.
 
-## 📦 CẤU TRÚC
+| File | Trách nhiệm |
+|---|---|
+| Common.java | Port/opcode, tick, bốn người, kích thước và spawn |
+| GameData.java | PlayerState, MonsterState, ItemState, PlayerInput bất biến, WorldSnapshot |
+| GameProtocol.java | TCP framing/lọc tên, GAM1, snapshot nhị phân v2 full/delta/ghép mảnh/copy; còn hàm văn bản không phải transport gameplay hiện tại |
+| GameMap.java | DOM XML TMX/TSX, collision, CSV tile layer, vùng spawn liên thông, vẽ map |
+| GamePhysics.java | Di chuyển/đi chéo/va chạm, knockback, hitbox, animation |
+| MonsterAI.java | A* bốn hướng có ngân sách, workspace tái dùng, đuổi/đánh/LOS |
+| CombatSystem.java | Đòn đánh player, quái chết và lịch sử rewind giới hạn |
+| SpawnSystem.java | Điểm đi được/liên thông/không chồng; fallback grid và null khi hết chỗ |
+| ItemSystem.java | Bình máu map/drop, nhặt, respawn, TTL, giới hạn item |
+| SaveManager.java | DTO/JSON offline/online, kiểm vị trí khi load |
 
-| File | Vai trò |
-|------|---------|
-| `Common.java` | Hằng số: `PORT`, kích thước tile/chunk, vị trí spawn, **tên lệnh giao thức**, `TICK_RATE`/`TICK_NS`, `MAX_PLAYERS_PER_ROOM` |
-| `Protocol.java` | Giới hạn & timeout của giao thức, lọc tên (`sanitizeName`, `sanitizeRoom`), `fmt2` (định dạng tọa độ), `readLineLimited` (đọc dòng có giới hạn độ dài) |
-| `Player.java` | Model người chơi: vị trí, vận tốc, phím, hướng nhìn, frame animation |
-| `AnimationController.java` | Nhịp đổi frame bước chân, độc lập với vật lý |
-| `PhysicsEngine.java` | Vật lý top-down 4 hướng + va chạm tile. **Tất định**: cùng input ⇒ cùng kết quả |
-| `MapManager.java` | Nạp bản đồ TMX (3×3 chunk), thuộc tính collision từ `tileset.tsx`, vẽ bản đồ |
+PortedGameplayRegressionChecks là chương trình test.
 
-## ⚠️ QUY ƯỚC QUAN TRỌNG
+Tile 16 px × scale 3 = **48 px**; comment 32px trong Common đã cũ. Map 3×3 chunk, 32×32 tile/chunk, tổng 4608×4608 px, spawn (1056,864). Map đang dùng source/content/map, đường dẫn tương đối từ gốc. Server tải collision độc lập ảnh.
 
-- **`PhysicsEngine` và `MapManager` được server dùng để quyết định vị trí và được client dùng để dự đoán.**
-  Mọi thay đổi trong hai file này phải giữ tính tất định (không dùng `Math.random`, thời gian thực, trạng thái ngoài `Player`),
-  nếu không client sẽ dự đoán sai và nhân vật bị giật khi hòa giải.
-- Đường dẫn bản đồ là `source/content/map` (tương đối từ thư mục gốc project).
-- Server chỉ cần dữ liệu va chạm (`loadTilesetProperties`), không cần nạp ảnh tileset — thông tin collision độc lập với việc có nạp ảnh hay không.
-- Mọi tên đi qua mạng phải qua `Protocol.sanitizeName/sanitizeRoom` để không chứa ký tự phân cách `; , : |`.
+CSV trong TMX được đọc thật; statics/dataset_sample.csv không dùng cho logic game. Vật lý chung hỗ trợ prediction nhưng khác nhịp và input vẫn gây lệch; không gọi toàn bộ gameplay là tất định tuyệt đối. Snapshot tối đa 499 byte ứng dụng/mảnh, delta dựa trên full baseline. Save chưa lưu toàn thế giới, JSON parser thủ công và write chưa nguyên tử.
+
+Build qua launcher gốc, không ghi class vào source. Đổi wire/save phải xét version, decoder, caller và test hai phía.

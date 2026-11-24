@@ -2,16 +2,41 @@ package source.common;
 
 import java.awt.Rectangle;
 
+/*
+ * Luật chuyển động, va chạm và hình học dùng chung. updatePlayer được server chạy authoritative và client
+ * gọi khi prediction/replay. Các hàm moveMonsterX/Y là tên wrapper kiểm va chạm; chúng không tự cộng tọa
+ * độ quái.
+ * PLAYER_SPEED=6, MONSTER_SPEED=1,5 pixel mỗi bước chuẩn; ENTITY_SIZE=48. Vị trí/vận tốc được sửa trực
+ * tiếp trong model; map cung cấp truy vấn điểm chặn.
+ */
 public class GamePhysics {
 
+    /*
+     * PLAYER_SPEED: Bước tốc độ player cơ sở, được nhân theo dt.
+     */
     public static final float PLAYER_SPEED = 6.0f;
+    /*
+     * MONSTER_SPEED: Bước tốc độ quái cơ sở.
+     */
     public static final float MONSTER_SPEED = 1.5f;
+    /*
+     * ENTITY_SIZE: Kích thước hitbox entity, pixel.
+     */
     public static final int ENTITY_SIZE = (int) (16 * Common.SCALE);
 
 
 
 
 
+    /*
+     * updatePlayer()
+     * Nhận dt giây, tính tốc độ 6 × dt × 60, cộng phím theo trục và nhân 0,7071 khi đi chéo. Dời X rồi
+     * kiểm collision, dời Y rồi kiểm tiếp; cập nhật hướng theo ưu tiên trái/phải/lên/xuống, frame bước
+     * chân và kết thúc animation đánh khi ++attackTicks > 15. Không tự gửi input hoặc snapshot.
+     * Với overload có dt: xóa vận tốc cũ, tính tốc độ từ phím và dt×60; đi chéo nhân 0.7071 để không nhanh
+     * hơn. Áp X và sửa collision X trước, rồi áp Y và sửa collision Y. Cuối cùng đổi hướng, frame đi bộ và
+     * tăng thời gian đòn đánh; không tự tính damage trong hàm này.
+     */
     public static void updatePlayer(GameData.PlayerState p, GameMap map, float dt) {
         p.vx = 0;
         p.vy = 0;
@@ -22,10 +47,16 @@ public class GamePhysics {
         if (p.up) p.vy -= currentSpeed;
         if (p.down) p.vy += currentSpeed;
 
+        /*
+         * Chuẩn hóa đi chéo để tốc độ tổng không nhanh hơn đi thẳng.
+         */
         if (p.vx != 0 && p.vy != 0) {
             p.vx *= 0.7071f;
             p.vy *= 0.7071f;
         }
+        /*
+         * Áp và sửa collision X trước, sau đó mới tới Y; ảnh vẽ không quyết định va chạm.
+         */
         if (p.vx != 0) {
             p.x += p.vx;
             checkCollisionX(p, map);
@@ -57,6 +88,10 @@ public class GamePhysics {
         }
     }
 
+    /*
+     * updatePlayer()
+     * Gọi bản có dt với 1/60 giây; đây là overload dùng cho mỗi bước mô phỏng chuẩn và replay prediction.
+     */
     public static void updatePlayer(GameData.PlayerState p, GameMap map) {
         updatePlayer(p, map, 1.0f / 60.0f);
     }
@@ -70,6 +105,11 @@ public class GamePhysics {
 
 
 
+    /*
+     * applyKnockback()
+     * Tính vector đẩy player ra xa nguồn với độ dài force, cập nhật từng trục có collision rồi xóa vận
+     * tốc. Là tác động tức thời trong bước hiện tại, không phải lực gia tốc kéo dài.
+     */
     public static void applyKnockback(
             GameData.PlayerState target, float sourceX, float sourceY, float force, GameMap map) {
         float[] push = knockbackVector(target.x, target.y, sourceX, sourceY, force);
@@ -83,6 +123,11 @@ public class GamePhysics {
         target.vy = 0;
     }
 
+    /*
+     * applyKnockback()
+     * Đẩy quái tương tự player nhưng dùng collision của quái; sau đẩy xóa path, pathIndex và nextPathAt để
+     * AI lập lại đường từ vị trí mới.
+     */
     public static void applyKnockback(
             GameData.MonsterState target, float sourceX, float sourceY, float force, GameMap map) {
         float[] push = knockbackVector(target.x, target.y, sourceX, sourceY, force);
@@ -99,6 +144,11 @@ public class GamePhysics {
         target.nextPathAt = 0;
     }
 
+    /*
+     * knockbackVector()
+     * Lấy vector từ nguồn tới đích, chuẩn hóa và nhân force. Khi hai điểm trùng nhau dùng hướng phải để
+     * tránh chia 0; trả float[2] chứa thành phần X/Y.
+     */
     private static float[] knockbackVector(float x, float y, float sourceX, float sourceY, float force) {
         float dx = x - sourceX;
         float dy = y - sourceY;
@@ -120,6 +170,11 @@ public class GamePhysics {
 
 
 
+    /*
+     * checkCollisionX()
+     * Với player đang đi ngang, thử hai điểm bên sườn theo dấu vx. Nếu chạm tile chặn thì đặt x sát mép
+     * tile, lệch 0,1 pixel để tránh kẹt; không kiểm swept collision toàn đoạn.
+     */
     private static void checkCollisionX(GameData.PlayerState p, GameMap map) {
         if (p.vx > 0) {
             if (map.isCollisionAtWorld((int)(p.x + ENTITY_SIZE), (int)p.y + 4)
@@ -134,6 +189,11 @@ public class GamePhysics {
         }
     }
 
+    /*
+     * checkCollisionY()
+     * Kiểm hai điểm cạnh trên/dưới theo dấu vy, sửa y về mép tile cùng epsilon 0,1. Tách trục giúp player
+     * trượt dọc tường thay vì dừng cả hai chiều.
+     */
     private static void checkCollisionY(GameData.PlayerState p, GameMap map) {
         if (p.vy > 0) {
             if (map.isCollisionAtWorld((int)p.x + 4, (int)(p.y + ENTITY_SIZE))
@@ -148,6 +208,10 @@ public class GamePhysics {
         }
     }
 
+    /*
+     * checkMonsterCollisionX()
+     * Phiên bản kiểm sườn X cho MonsterState; được knockback và AI dùng sau khi quái đã cộng x.
+     */
     static void checkMonsterCollisionX(GameData.MonsterState m, GameMap map) {
         if (m.vx > 0) {
             if (map.isCollisionAtWorld((int)(m.x + ENTITY_SIZE), (int)m.y + 4)
@@ -162,6 +226,10 @@ public class GamePhysics {
         }
     }
 
+    /*
+     * checkMonsterCollisionY()
+     * Phiên bản kiểm cạnh Y cho quái; giới hạn tọa độ ở mép vật cản sau bước di chuyển.
+     */
     static void checkMonsterCollisionY(GameData.MonsterState m, GameMap map) {
         if (m.vy > 0) {
             if (map.isCollisionAtWorld((int)m.x + 4, (int)(m.y + ENTITY_SIZE))
@@ -176,14 +244,33 @@ public class GamePhysics {
         }
     }
 
+    /*
+     * moveMonsterX()
+     * Wrapper package-private gọi checkMonsterCollisionX. Caller phải cộng vị trí X trước; tên hàm không
+     * có nghĩa tự di chuyển.
+     */
     static void moveMonsterX(GameData.MonsterState m, GameMap map) { checkMonsterCollisionX(m, map); }
 
+    /*
+     * moveMonsterY()
+     * Wrapper package-private gọi checkMonsterCollisionY sau bước Y mà AI đã thực hiện.
+     */
     static void moveMonsterY(GameData.MonsterState m, GameMap map) { checkMonsterCollisionY(m, map); }
 
+    /*
+     * getEntityBounds()
+     * Tạo Rectangle từ x/y ép số nguyên và kích thước 48×48. Dùng để kiểm chạm quái, người chơi và bình
+     * máu.
+     */
     public static Rectangle getEntityBounds(float x, float y) {
         return new Rectangle((int) x, (int) y, ENTITY_SIZE, ENTITY_SIZE);
     }
 
+    /*
+     * getAttackHitbox()
+     * Tạo hình chữ nhật tấn công nhô 36 pixel ra khỏi cạnh nhân vật theo hướng; hướng không nhận biết dùng
+     * hitbox thân. Chỉ tạo hình học, CombatSystem còn phải kiểm LOS và sát thương.
+     */
     public static Rectangle getAttackHitbox(float x, float y, String direction) {
         int range = 36;
         switch (direction) {

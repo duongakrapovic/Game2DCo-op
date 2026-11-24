@@ -5,13 +5,44 @@ import java.awt.*;
 import java.util.*;
 import javax.imageio.ImageIO;
 
+/*
+ * Chuyên tải sprite và vẽ một frame từ ClientGame, không sở hữu loop gameplay hoặc quyết định HP. Thiếu
+ * ảnh bắt buộc phát sinh lỗi rõ; không thay bình máu bằng hình tự vẽ.
+ * Map sprite theo hướng/frame cho player thường và đang đánh, ảnh slime, bình máu và ScoreboardOverlay.
+ * Graphics2D do panel cấp; camera theo vị trí focus local.
+ */
 public final class ClientRenderer {
+    /*
+     * spriteMap: Ảnh sprite đã tải; renderer chọn theo hướng, frame và loại entity.
+     */
     private final Map<String, Image[]> spriteMap = new HashMap<>();
+    /*
+     * axeSpriteMap: Ảnh sprite đã tải; renderer chọn theo hướng, frame và loại entity.
+     */
     private final Map<String, Image[]> axeSpriteMap = new HashMap<>();
+    /*
+     * slimeSprites: Ảnh sprite đã tải; renderer chọn theo hướng, frame và loại entity.
+     */
     private final Image[] slimeSprites = new Image[2];
+    /*
+     * potionImage: Ảnh sprite đã tải; renderer chọn theo hướng, frame và loại entity.
+     */
     private Image potionImage;
+    /*
+     * scoreboard: Cờ/lớp phủ TAB hoặc nội dung HUD thông báo reconnect và voice.
+     */
     private final ScoreboardOverlay scoreboard = new ScoreboardOverlay();
+    /*
+     * Khởi tạo ClientRenderer
+     * Gọi loadAssets một lần khi tạo renderer; lỗi asset xảy ra ngay trong khởi tạo thay vì đợi lần vẽ
+     * sau.
+     */
     public ClientRenderer() { loadAssets(); }
+    /*
+     * loadAssets()
+     * Nạp các ảnh thật dùng cho player/đánh/slime/bình, sắp theo hướng và frame. Không vì có ảnh boss/NPC
+     * trong content mà tự sinh hành vi cho chúng.
+     */
     private void loadAssets() {
         String pPath = "source/content/player/";
         String mPath = "source/content/monster/";
@@ -36,6 +67,11 @@ public final class ClientRenderer {
             potionImage = loadRequiredImage("source/content/object/healthposion.png");
     }
 
+    /*
+     * loadRequiredImage()
+     * Mở file ảnh và ImageIO.read; kiểm đọc được, bọc lỗi thành thông báo asset bắt buộc. Trả Image thật,
+     * không fallback placeholder.
+     */
     private Image loadRequiredImage(String path) {
         try (java.io.InputStream input = new java.io.FileInputStream(path)) {
             Image image = ImageIO.read(input);
@@ -45,6 +81,15 @@ public final class ClientRenderer {
             throw new IllegalStateException("Khong nap duoc asset: " + path, error);
         }
     }
+    /*
+     * render()
+     * Tính camera theo local, vẽ map và các player/quái/item, sprite/hướng/đòn đánh/flash/HP/tên. Online
+     * local lấy vị trí prediction, người khác lấy mẫu nội suy; item collected không vẽ. Sau thế giới vẽ
+     * HUD/status/banner và scoreboard khi TAB. Không tự gửi STATE, trừ máu hoặc nhặt item.
+     * Lấy camera quanh tọa độ local dự đoán hoặc player offline; vẽ map → item còn hiện → quái sống →
+     * player/đòn đánh → HUD → voice → banner → TAB. Chỉ đồng đội dùng interpolation; quái chưa có pipeline
+     * nội suy tương tự. Sprite rìu được kéo kích thước theo hướng để vẽ, không quyết định hitbox server.
+     */
     public void render(Graphics2D g2, ClientGame panel) {
         g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
 

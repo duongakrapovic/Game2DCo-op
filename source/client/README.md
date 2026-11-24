@@ -1,43 +1,26 @@
 # Module Client
 
-Client là ứng dụng Java Swing, xử lý giao diện menu/sảnh/game, gửi input và
-hiển thị trạng thái do server authoritative cung cấp. Prediction, reconciliation
-và nội suy người chơi khác luôn được áp dụng tự động.
+Swing Menu/Lobby/Game, online kết nối dedicated server, offline mô phỏng local bằng common. Cập nhật 19/11/2026 theo code 7fd270b.
 
 ## Chạy
 
-Chạy từ thư mục gốc của dự án để client tìm được tài nguyên:
+Từ gốc chạy `run-client.bat` hoặc `.\run-client.bat` trong PowerShell. Cần JDK 17+. `--compile-only` chỉ build. Output riêng `.runtime/client-...`, không ghi class vào source; loại RegressionChecks khỏi build sản xuất.
 
-```bat
-run-client.bat
-```
-
-Hoặc biên dịch và chạy thủ công:
-
-```bat
-javac -encoding UTF-8 source\common\*.java source\client\*.java
-java -cp . source.client.ClientApp
-```
-
-## Cấu trúc
+Offline không cần server. Online nhập IP máy đã bật server; localhost là chính máy client. Cần đường truy cập server và TCP/UDP 8888, không bắt buộc LAN ảo nếu mạng đã thông.
 
 | Class | Trách nhiệm |
 |---|---|
-| `ClientApp` | Menu, sảnh phòng, điều khiển, kết nối các thành phần client |
-| `ClientNetwork` | Kết nối TCP, heartbeat `PING/PONG` không đo RTT và tự kết nối lại bằng `RESUME` |
-| `ClientMovement` | Prediction/reconciliation và nội suy snapshot người chơi khác |
-| `ClientGame` | Render bản đồ, người chơi, quái và trạng thái voice |
-| `ClientVoiceChat` | Thu/phát PCM qua Java Sound và gửi/nhận voice qua UDP relay |
+| ClientApp | JFrame/CardLayout, menu/lobby, phím và vòng đời phòng |
+| ClientGame | Input, timer client, áp snapshot, phối hợp hiển thị |
+| ClientNetwork | TCP phiên/phòng/RESUME, UDP GAM1 đăng ký/input/state và RTT/jitter |
+| ClientMovement | Prediction/pending/reconciliation theo ACK, nội suy người khác trễ khoảng 100 ms |
+| ClientRenderer | Tải ảnh thật, vẽ map/entity/bình máu/HUD/voice |
+| ClientVoiceChat | PCM mono 16 kHz/16 bit qua UDP VCH1, thu/phát/mute |
+| OfflineGameLoop | Thread offline dùng common, copy snapshot sang EDT và save |
+| ScoreboardOverlay | Bảng người chơi khi giữ TAB |
 
-Voice chat tự bật micro khi vào phòng online. Nhấn `M` để mute/unmute; voice
-dừng khi rời phòng hoặc thoát game. Cần cho phép cả TCP và UDP qua cổng `8888`
-trên máy chủ. Nếu không có thiết bị micro/loa, game vẫn chạy nhưng voice tương
-ứng sẽ không hoạt động.
+Network I/O và mô phỏng offline ngoài EDT. Timer client 16 ms danh nghĩa không đồng nhịp tuyệt đối với tick server. Prediction không trao quyền quyết định vị trí cho client. Quái chưa có cùng pipeline nội suy như người khác.
 
-## Điều khiển
+WASD/mũi tên di chuyển; J/chuột trái đánh; giữ TAB xem bảng; M mute; ESC xác nhận rời về menu. Mất focus xóa phím. Voice tự thu trong phòng; thiếu micro/loa báo riêng; chưa có codec/mixer hoàn chỉnh.
 
-| Phím | Hành động |
-|---|---|
-| `W` `A` `S` `D` / phím mũi tên | Di chuyển |
-| `M` | Tắt/bật micro trong phòng online |
-| `ESC` | Thoát về menu |
+Token chỉ ở RAM, RESUME không phải đăng nhập hôm sau. Save offline ở saves/offline_save.json; online do server lưu. Test trong module gồm AssetRegressionChecks, AuditRegressionChecks, LobbySpawnRegressionChecks; một số tham chiếu server nên không gom vào build client sản xuất. Xem README gốc cho giao thức và giới hạn.

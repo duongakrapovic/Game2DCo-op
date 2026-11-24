@@ -5,17 +5,46 @@ import java.awt.geom.Point2D;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** Admission tests use in-memory slots and a no-I/O persistence callback. */
+/*
+ * Kiểm nhận người vào slot save bằng DTO trong RAM và persist callback giả. Mục tiêu phân biệt trùng tên,
+ * grace, rời chủ động và bốn slot lịch sử có chủ.
+ * MAP là bản override không đọc map thật; writes AtomicInteger chứng minh persist đã được gọi mà không ghi
+ * file.
+ */
 public final class RoomAdmissionRegressionChecks {
+    /*
+     * checks: Bộ đếm, tài nguyên nhân tạo hoặc cấu hình chỉ dùng trong kiểm thử.
+     */
     private static int checks;
+    /*
+     * check()
+     * Tăng bộ đếm điều kiện, nếu biểu thức false thì ném AssertionError với message để test dừng và chỉ ra
+     * điều kiện sai. Không thay dữ liệu game đang chơi.
+     */
     private static void check(boolean value, String message) {
         checks++;
         if (!value) throw new AssertionError(message);
     }
+    /*
+     * Lớp ẩn cung cấp callback hoặc dữ liệu giả cho ngữ cảnh bao quanh; caller/hệ thống gọi các hàm
+     * override bên dưới.
+     * MAP: Bộ đếm, tài nguyên nhân tạo hoặc cấu hình chỉ dùng trong kiểm thử.
+     */
     private static final GameMap MAP = new GameMap() {
+        /*
+         * validatedPlayerSpawn()
+         * Map giả trả nguyên x/y thành Point2D.Float. Test admission không phụ thuộc dữ liệu bản đồ hoặc
+         * kiểm collision ở đây.
+         */
         @Override public Point2D.Float validatedPlayerSpawn(float x, float y) {
             return new Point2D.Float(x, y);
         }
     };
+    /*
+     * rejected()
+     * Gọi saves.join với ID/tên cần thử và yêu cầu nó ném IllegalStateException. Kiểm message chứa lý do
+     * cụ thể và khác thông báo chung 'Phong da day!', tránh lẫn lỗi slot với đủ người online.
+     */
     private static void rejected(RoomSaveManager saves, String id, String name, String expected) {
         try {
             saves.join(new GameData.PlayerState(id, name));
@@ -25,9 +54,19 @@ public final class RoomAdmissionRegressionChecks {
             check(!error.getMessage().equals("Phong da day!"), "Do not conflate admission with capacity");
         }
     }
+    /*
+     * main()
+     * Kiểm join đầu, tên trùng không cấp slot mới, detach giữ ID báo 20 giây, attach rồi rời chủ động cho
+     * nhận lại tiến trình bằng tên cũ. Dựng bốn chủ lịch sử, từ chối tên thứ năm nhưng cho chủ cũ vào và
+     * giữ HP/vị trí; kiểm persist callback.
+     */
     public static void main(String[] args) {
         AtomicInteger writes = new AtomicInteger();
         SaveManager.OnlineSaveData data = new SaveManager.OnlineSaveData("memory-only");
+        /*
+         * Callback/lambda: Consumer ghi save giả bằng tăng bộ đếm writes, giúp kiểm admission mà không ghi
+         * file save người dùng.
+         */
         RoomSaveManager saves = new RoomSaveManager(data, MAP, ignored -> writes.incrementAndGet());
         GameData.PlayerState first = new GameData.PlayerState("P1", "Player");
         check(saves.join(first), "First entry");
@@ -51,6 +90,10 @@ public final class RoomAdmissionRegressionChecks {
             slot.status = "DISCONNECTED"; slot.playerName = "Saved" + i;
             slot.x = 100 + i; slot.y = 200; slot.hp = 80; slot.maxHp = 100;
         }
+        /*
+         * Callback/lambda: Consumer ghi save giả bằng tăng bộ đếm writes, giúp kiểm admission mà không ghi
+         * file save người dùng.
+         */
         RoomSaveManager restored = new RoomSaveManager(occupied, MAP, ignored -> writes.incrementAndGet());
         rejected(restored, "NEW", "NewRandomName", "4 slot save da co chu");
         for (int i = 0; i < 4; i++) check(occupied.slots.get(i).playerName.equals("Saved" + i), "Saved owner preserved");

@@ -7,7 +7,19 @@ import java.util.*;
 import javax.imageio.ImageIO;
 import java.io.File;
 
+/*
+ * Vẽ lớp phủ bảng người chơi khi renderer được yêu cầu hiển thị TAB. Bảng là hình ảnh từ snapshot hiện
+ * tại, không phải giao diện chỉnh bốn slot JSON.
+ * Không có trường trạng thái riêng; render nhận Graphics2D và ClientGame, đọc tên phòng, myId, danh sách
+ * player và ping.
+ */
 public final class ScoreboardOverlay {
+    /*
+     * render()
+     * Làm tối nền, vẽ panel/bốn hàng và các cột slot/tên/trạng thái/HP/ping; tô local player bằng isMe.
+     * Online lấy player đang hiển thị, không liệt kê mọi chủ save đã offline; thứ tự danh sách không tự
+     * gắn với slotIndex lưu trên đĩa. Offline có nhánh riêng trong source nhưng không thuộc luồng online.
+     */
     public void render(Graphics2D g2, ClientGame panel) {
         int width = panel.getWidth(), height = panel.getHeight();
         String myName = panel.myName, currentRoomName = panel.currentRoomName;

@@ -5,7 +5,20 @@ import java.net.URLClassLoader;
 import java.nio.file.Path;
 
 /** Verifies lazy class loading after another launcher compiles, without loading assets or saves. */
+/*
+ * Kiểm classpath riêng từng launcher và lỗi nạp class muộn sau khi launcher khác build. Không chạy
+ * gameplay hoặc đọc save.
+ * Dùng URLClassLoader với platform parent, giữ classloader server/client ban đầu khi chạy compile-only hai
+ * launcher. Hai đường output nhận qua args.
+ */
 public final class LauncherRegressionChecks {
+    /*
+     * main()
+     * Cần hai argument thư mục class server/client. Mở loader riêng, nạp một số khai báo server, chạy
+     * launcher compile-only lần nữa, rồi yêu cầu nạp ServerGame/RoomSaveManager/common và các class client
+     * bằng loader cũ. Kiểm client output không có ServerApp. Pass chứng minh output cũ không bị launcher
+     * khác xóa, không thay test toàn bộ game.
+     */
     public static void main(String[] args) throws Exception {
         if (args.length != 2) throw new IllegalArgumentException("Expected server and client class directories");
         ClassLoader platform = ClassLoader.getPlatformClassLoader();

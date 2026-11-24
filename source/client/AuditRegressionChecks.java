@@ -9,13 +9,31 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 
 /** Standalone checks without assets, save files, Swing windows or external libraries. */
+/*
+ * Kiểm hồi quy protocol, chiến đấu/A* và nối lại UDP qua server giả loopback. Không chạy cửa sổ game thật
+ * hay đọc save người dùng.
+ * Dùng snapshot mẫu, CountDownLatch/AtomicReference để đợi thread mock và bắt lỗi. Nhiều check packet sai
+ * được sinh có seed, không tương đương phủ mọi điều kiện mạng.
+ */
 public final class AuditRegressionChecks {
+    /*
+     * checks: Bộ đếm, tài nguyên nhân tạo hoặc cấu hình chỉ dùng trong kiểm thử.
+     */
     private static int checks;
+    /*
+     * check()
+     * Tăng bộ đếm điều kiện, nếu biểu thức false thì ném AssertionError với message để test dừng và chỉ ra
+     * điều kiện sai. Không thay dữ liệu game đang chơi.
+     */
     private static void check(boolean condition, String message) {
         checks++;
         if (!condition) throw new AssertionError(message);
     }
 
+    /*
+     * main()
+     * Chạy binarySnapshots, combatAndPathfinding và reconnectKeepsUdp rồi in số check đạt.
+     */
     public static void main(String[] args) throws Exception {
         binarySnapshots();
         combatAndPathfinding();
@@ -23,6 +41,11 @@ public final class AuditRegressionChecks {
         System.out.println("PASS: " + checks + " regression assertions");
     }
 
+    /*
+     * world()
+     * Tạo snapshot mẫu bốn player có tên Unicode/ACK/ping và 15 quái. Dùng kiểm round-trip và delta, không
+     * là thế giới server đang sống.
+     */
     private static GameData.WorldSnapshot world() {
         GameData.WorldSnapshot world = new GameData.WorldSnapshot();
         for (int i = 0; i < 4; i++) {
@@ -34,6 +57,11 @@ public final class AuditRegressionChecks {
         return world;
     }
 
+    /*
+     * packets()
+     * Gọi encoder binary với stream cố định 123 rồi kiểm mọi datagram dưới 500 byte và có magic GAM1; trả
+     * list packet.
+     */
     private static List<byte[]> packets(long seq, long base, GameData.WorldSnapshot world, GameData.WorldSnapshot baseline) {
         List<byte[]> packets = GameProtocol.serializeSnapshotBinary(seq, 123, base, world, baseline);
         for (byte[] packet : packets) {
@@ -43,6 +71,10 @@ public final class AuditRegressionChecks {
         return packets;
     }
 
+    /*
+     * feed()
+     * Đưa list packet lần lượt vào decoder và trả snapshot hoàn chỉnh mới nhất. Không send DatagramSocket.
+     */
     private static GameData.WorldSnapshot feed(GameProtocol.SnapshotDecoder decoder, List<byte[]> packets) {
         GameData.WorldSnapshot result = null;
         for (byte[] packet : packets) {
@@ -53,11 +85,22 @@ public final class AuditRegressionChecks {
         return result;
     }
 
+    /*
+     * equivalent()
+     * Kiểm actual khác null và so chuỗi do serializeSnapshot sinh cho expected/actual. Vì so qua tiện ích
+     * text có làm tròn/thiếu một số trường, test này không tự chứng minh bit-for-bit mọi field binary.
+     */
     private static void equivalent(GameData.WorldSnapshot expected, GameData.WorldSnapshot actual) {
         check(actual != null, "Snapshot completed");
         check(GameProtocol.serializeSnapshot(expected).equals(GameProtocol.serializeSnapshot(actual)), "Snapshot round trip");
     }
 
+    /*
+     * binarySnapshots()
+     * Kiểm full ghép đảo mảnh, duplicate/late drop, delta độc lập delta mất, thêm/xóa entity, baseline,
+     * full tới sau delta, missing piece, stream cũ và 200 packet ngẫu nhiên sai. Kiểm copy snapshot tách
+     * khỏi source.
+     */
     private static void binarySnapshots() {
         GameData.WorldSnapshot baseline = world();
         GameProtocol.SnapshotDecoder decoder = new GameProtocol.SnapshotDecoder();
@@ -106,8 +149,21 @@ public final class AuditRegressionChecks {
         check(changed.players.get(0).x != copy.players.get(0).x, "Detached render snapshot");
     }
 
+    /*
+     * combatAndPathfinding()
+     * Ghi lịch sử quái rồi di chuyển xa để so đòn live với rewind, kiểm knockback trên vị trí hiện tại và
+     * clear history. Kiểm clamp ping, A* trên map trống, workspace tái dùng và điểm đầu sai.
+     */
     private static void combatAndPathfinding() {
+        /*
+         * Lớp ẩn cung cấp callback hoặc dữ liệu giả cho ngữ cảnh bao quanh; caller/hệ thống gọi các hàm
+         * override bên dưới.
+         */
         GameMap map = new GameMap() {
+            /*
+             * isCollisionAtWorld()
+             * Map giả của test: biên âm chặn, vùng dương trống. Không nạp TMX thật.
+             */
             @Override public boolean isCollisionAtWorld(int x, int y) { return x < 0 || y < 0; }
         };
         GameData.PlayerState player = new GameData.PlayerState("P", "Player");
@@ -118,12 +174,21 @@ public final class AuditRegressionChecks {
         history.record(monsters, 0);
         monster.x = 200;
         history.record(monsters, 12);
+        /*
+         * Callback/lambda: Supplier cố định 180 tick cho ca combat kiểm thử.
+         */
         CombatSystem.resolveAttack(player, monsters, map, () -> 180, null, 12);
         check(monster.hp == 30, "No hit at live distant position");
+        /*
+         * Callback/lambda: Supplier cố định 180 tick cho ca combat kiểm thử.
+         */
         CombatSystem.resolveAttack(player, monsters, map, () -> 180, history, 12);
         check(monster.hp == 15, "Lag compensation hits historical bounds");
         check(monster.x > 200, "Knockback applied at current position");
         history.clear(monster.id);
+        /*
+         * Callback/lambda: Supplier cố định 180 tick cho ca combat kiểm thử.
+         */
         CombatSystem.resolveAttack(player, monsters, map, () -> 180, history, 12);
         check(monster.hp == 15, "Cleared history cannot hit a new life");
         check(new GameData.PlayerInput(1, true, false, false, true, false, 10000).pingMs == 200, "Bound client ping");
@@ -135,6 +200,12 @@ public final class AuditRegressionChecks {
         check(MonsterAI.findPath(-1, 1, 9, 8, map, workspace).length == 0, "Invalid path rejected");
     }
 
+    /*
+     * reconnectKeepsUdp()
+     * Dựng TCP/UDP mock loopback, gửi WELCOME/JOINED, ngắt TCP rồi nhận RESUME token gốc và đăng ký UDP
+     * lại. Kiểm không rò token tạm, endpoint UDP được giữ và snapshot sau resume tiếp tục tới listener;
+     * dọn socket/client/thread ở finally.
+     */
     private static void reconnectKeepsUdp() throws Exception {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         CountDownLatch firstState = new CountDownLatch(1), resumedState = new CountDownLatch(1);
@@ -146,14 +217,41 @@ public final class AuditRegressionChecks {
                 DatagramSocket udp = new DatagramSocket(tcp.getLocalPort(), InetAddress.getLoopbackAddress())) {
             tcp.setSoTimeout(15000);
             ClientNetwork client = new ClientNetwork(InetAddress.getLoopbackAddress().getHostAddress(), tcp.getLocalPort(),
+                    /*
+                     * Lớp ẩn cung cấp callback hoặc dữ liệu giả cho ngữ cảnh bao quanh; caller/hệ thống
+                     * gọi các hàm override bên dưới.
+                     */
                     new ClientNetwork.Listener() {
+                        /*
+                         * onMessage()
+                         * Callback mock không xử lý dòng TCP vì test tập trung nhận snapshot/khôi phục
+                         * UDP.
+                         */
                         public void onMessage(String message) {}
+                        /*
+                         * onStateChanged()
+                         * Callback mock bỏ qua state UI, không có cửa sổ cần cập nhật.
+                         */
                         public void onStateChanged(ClientNetwork.State state, String info) {}
+                        /*
+                         * onSessionLost()
+                         * Ghi AssertionError vào failure khi client mất phiên ngoài kỳ vọng; thread test
+                         * chính đọc để kết luận.
+                         */
                         public void onSessionLost(String reason) { failure.set(new AssertionError(reason)); }
+                        /*
+                         * onSnapshot()
+                         * Đếm latch firstState hoặc resumedState tùy đã vào giai đoạn resume; cho test
+                         * biết receiver UDP còn hoạt động ở cả hai lượt.
+                         */
                         public void onSnapshot(GameData.WorldSnapshot snapshot) {
                             if (resumed.get()) resumedState.countDown(); else firstState.countDown();
                         }
                     });
+            /*
+             * Callback/lambda: Thân thread mock TCP tạo ngắt rồi phục hồi, kiểm client gửi đúng RESUME
+             * token gốc.
+             */
             Thread tcpServer = new Thread(() -> {
                 try {
                     try (Socket first = tcp.accept()) {
@@ -172,6 +270,10 @@ public final class AuditRegressionChecks {
                     }
                 } catch (Throwable error) { failure.compareAndSet(null, error); }
             }, "Audit-Mock-TCP");
+            /*
+             * Callback/lambda: Thân thread mock UDP kiểm token, endpoint, ACK generation và phát snapshot
+             * trước/sau reconnect.
+             */
             Thread udpServer = new Thread(() -> {
                 try {
                     byte[] buffer = new byte[4096];

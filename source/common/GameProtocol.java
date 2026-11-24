@@ -9,17 +9,61 @@ import java.util.*;
 /**
  * GAMEPROTOCOL.JAVA - Tiện ích mã hóa & giải mã chuỗi TCP Packet
  */
+/*
+ * Đặc tả dữ liệu dùng chung hai phía: TCP theo dòng, UDP gameplay GAM1, encode/decode snapshot và các hàm
+ * lọc tên. Luồng online hiện dùng binary v2; serializeSnapshot/parseSnapshot văn bản vẫn có trong source
+ * nhưng không là đường STATE sản xuất của ServerGame.
+ * Snapshot chia nhóm POSITION=1, HP=2, ACTION_STATE=4, IDENTITY=8, NETWORK=16, REMOVE=32. Datagram tối đa
+ * 499 byte ứng dụng: GAM1/opcode 5 + header mảnh 29 + tối đa 465 body. SnapshotDecoder giữ baseline và tối
+ * đa tám assembly chờ; Assembly giữ các mảnh của một sequence.
+ */
 public class GameProtocol {
 
+    /*
+     * MAX_STATE_PACKET_BYTES: Giới hạn datagram STATE ở tầng ứng dụng.
+     */
     public static final int MAX_STATE_PACKET_BYTES = 499;
+    /*
+     * SNAPSHOT_VERSION: Phiên bản định dạng snapshot nhị phân.
+     */
     public static final byte SNAPSHOT_VERSION = 2;
+    /*
+     * BINARY_HEADER_BYTES: Số byte header nhị phân snapshot, chưa gồm header GAM1.
+     */
     private static final int BINARY_HEADER_BYTES = 29;
+    /*
+     * POSITION: Bit mask nhóm tọa độ.
+     * HP: Bit mask nhóm máu.
+     * ACTION_STATE: Bit mask nhóm hoạt ảnh.
+     * IDENTITY: Bit mask nhóm ID/tên/loại.
+     * NETWORK: Bit mask nhóm ACK và ping.
+     * REMOVE: Bit mask đánh dấu xóa entity.
+     */
     private static final int POSITION = 1, HP = 2, ACTION_STATE = 4, IDENTITY = 8, NETWORK = 16, REMOVE = 32;
+    /*
+     * FULL_PLAYER: Tổ hợp bit mask gửi đầy đủ thuộc tính entity khi không có baseline cũ.
+     */
     private static final int FULL_PLAYER = POSITION | HP | ACTION_STATE | IDENTITY | NETWORK;
+    /*
+     * FULL_ITEM: Tổ hợp bit mask gửi đầy đủ thuộc tính entity khi không có baseline cũ.
+     */
     private static final int FULL_ITEM = POSITION | HP | ACTION_STATE | IDENTITY;
+    /*
+     * FULL_MONSTER: Tổ hợp bit mask gửi đầy đủ thuộc tính entity khi không có baseline cũ.
+     */
     private static final int FULL_MONSTER = POSITION | HP | ACTION_STATE | IDENTITY;
 
     /** Deltas reference the last full baseline, so losing a delta never poisons later ticks. */
+    /*
+     * serializeSnapshotBinary()
+     * Nhận sequence, stream, baseline sequence, snapshot hiện tại và baseline hoặc null. Tính các record
+     * thay đổi/thêm/xóa theo ID; ghi dữ liệu vào ByteBuffer big-endian, chia body thành mảnh với
+     * version/stream/sequence/baseline/part/count rồi bọc GAM1 STATE. Trả List<byte[]> để server gửi từng
+     * datagram; delta so với full baseline, không phụ thuộc delta liền trước.
+     * Duyệt player, quái, item; so với full baseline để chọn bit mask thuộc tính thay đổi. Entity mới nhận
+     * nhóm FULL; ID đã biến mất phát REMOVE. Sao chép dữ liệu vào ByteBuffer, chia thành mảnh có version,
+     * stream, stateSeq, baselineSeq và chỉ số mảnh. Không gửi sprite hoặc file map trong các mảnh này.
+     */
     public static List<byte[]> serializeSnapshotBinary(long stateSeq, long streamId, long baselineSeq,
             GameData.WorldSnapshot current, GameData.WorldSnapshot baseline) {
         if (current.players.size() > 4 || current.monsters.size() > 64 || current.items.size() > ItemSystem.MAX_ITEMS) throw new IllegalArgumentException("Entity limit");
@@ -30,6 +74,9 @@ public class GameProtocol {
         int playerCount = 0;
         for (GameData.PlayerState player : current.players) {
             GameData.PlayerState old = oldPlayers.remove(player.id);
+            /*
+             * Entity mới gửi đủ nhóm thuộc tính; entity cũ chỉ gửi nhóm khác với full baseline.
+             */
             int flags = old == null ? FULL_PLAYER : playerFlags(player, old);
             if (flags == 0) continue;
             playerCount++;
@@ -40,6 +87,9 @@ public class GameProtocol {
             if ((flags & ACTION_STATE) != 0) body.put(action(player.direction, player.spriteNum, player.isAttacking)).put((byte) player.attackTicks);
             if ((flags & NETWORK) != 0) body.putInt(player.lastAckSeq).putShort((short) player.pingMs);
         }
+        /*
+         * Các ID còn lại trong bản cũ đã biến mất ở current, nên phát dấu REMOVE.
+         */
         for (String id : oldPlayers.keySet()) { playerCount++; putString(body, id); body.put((byte) REMOVE); }
         body.put(playerCountIndex, (byte) playerCount);
         int monsterCountIndex = body.position(); body.put((byte) 0);
@@ -74,6 +124,9 @@ public class GameProtocol {
         for (String id : oldItems.keySet()) { itemCount++; putString(body, id); body.put((byte) REMOVE); }
         body.putShort(itemCountIndex, (short) itemCount);
         int length = body.position();
+        /*
+         * Mỗi datagram STATE tối đa 499 byte ứng dụng; trừ header để tính dung lượng thân mảnh.
+         */
         int chunkBytes = MAX_STATE_PACKET_BYTES - UDP_HEADER_BYTES - BINARY_HEADER_BYTES;
         int count = (length + chunkBytes - 1) / chunkBytes;
         List<byte[]> packets = new ArrayList<>(count);
@@ -88,6 +141,12 @@ public class GameProtocol {
         return packets;
     }
 
+    /*
+     * itemFlags()
+     * So một item với old đã tồn tại để bật nhóm vị trí, lượng hồi, collected hoặc identity thay đổi.
+     * Helper không nhận old=null an toàn; serializeSnapshotBinary tự chọn FULL_ITEM khi ID mới trước khi
+     * gọi helper.
+     */
     private static int itemFlags(GameData.ItemState item, GameData.ItemState old) {
         int flags = 0;
         if (!Objects.equals(item.type, old.type)) flags |= IDENTITY;
@@ -97,12 +156,22 @@ public class GameProtocol {
         return flags;
     }
 
+    /*
+     * itemsById()
+     * Tạo map ID → ItemState từ danh sách item của snapshot; null snapshot tạo map rỗng. Được dùng khi so
+     * baseline và dựng lại item sau delta.
+     */
     private static Map<String, GameData.ItemState> itemsById(GameData.WorldSnapshot snapshot) {
         Map<String, GameData.ItemState> items = new LinkedHashMap<>();
         if (snapshot != null) for (GameData.ItemState item : snapshot.items) items.put(item.id, item);
         return items;
     }
 
+    /*
+     * playerFlags()
+     * So player với old đã có: x/y, HP/maxHp, hướng/frame/đánh/attackTicks, tên và ACK/ping. Helper trả
+     * các bit thay đổi; encoder tự chọn FULL_PLAYER cho ID mới, không serialize mọi trường runtime/phím.
+     */
     private static int playerFlags(GameData.PlayerState p, GameData.PlayerState old) {
         int flags = 0;
         if (!Objects.equals(p.name, old.name)) flags |= IDENTITY;
@@ -114,6 +183,11 @@ public class GameProtocol {
         return flags;
     }
 
+    /*
+     * monsterFlags()
+     * So quái với old đã có, trả cờ vị trí, HP, hướng/frame/dead và type khác nhau. Encoder xử lý ID mới
+     * bằng FULL_MONSTER, không gọi helper với null.
+     */
     private static int monsterFlags(GameData.MonsterState m, GameData.MonsterState old) {
         int flags = 0;
         if (!Objects.equals(m.type, old.type)) flags |= IDENTITY;
@@ -123,21 +197,41 @@ public class GameProtocol {
         return flags;
     }
 
+    /*
+     * action()
+     * Gói hướng vào hai bit thấp, sprite 1/2 vào bit kế và cờ active vào bit sau trong một byte. Ý nghĩa
+     * active do loại record quyết định, ví dụ player đánh hoặc quái chết.
+     */
     private static byte action(String direction, int sprite, boolean active) {
         int d = "up".equals(direction) ? 1 : "left".equals(direction) ? 2 : "right".equals(direction) ? 3 : 0;
         return (byte) (d | (sprite == 2 ? 4 : 0) | (active ? 8 : 0));
     }
 
+    /*
+     * direction()
+     * Giải mã hai bit thấp của action về chuỗi down/up/left/right. Các bit frame/active được caller đọc
+     * riêng.
+     */
     private static String direction(int action) {
         return switch (action & 3) { case 1 -> "up"; case 2 -> "left"; case 3 -> "right"; default -> "down"; };
     }
 
+    /*
+     * putString()
+     * Chuyển chuỗi thành UTF-8, kiểm độ dài giới hạn 128 byte và ghi một byte độ dài trước nội dung. Độ
+     * dài trên dây tính theo byte, không phải số ký tự Việt.
+     */
     private static void putString(ByteBuffer buffer, String value) {
         byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
         if (bytes.length > 128) throw new IllegalArgumentException("String too long");
         buffer.put((byte) bytes.length).put(bytes);
     }
 
+    /*
+     * getString()
+     * Đọc độ dài không dấu, kiểm không vượt 128 hoặc số byte còn lại, rồi giải mã UTF-8. Dữ liệu thiếu/sai
+     * gây exception để decoder từ chối packet.
+     */
     private static String getString(ByteBuffer buffer) {
         int length = Byte.toUnsignedInt(buffer.get());
         if (length > 128 || length > buffer.remaining()) throw new IllegalArgumentException("String length");
@@ -145,18 +239,33 @@ public class GameProtocol {
         return new String(bytes, StandardCharsets.UTF_8);
     }
 
+    /*
+     * playersById()
+     * Chuyển danh sách player thành map ID để tính delta hoặc cập nhật/xóa nhanh trong parser; baseline
+     * null được coi là map rỗng.
+     */
     private static Map<String, GameData.PlayerState> playersById(GameData.WorldSnapshot snapshot) {
         Map<String, GameData.PlayerState> result = new LinkedHashMap<>();
         if (snapshot != null) for (GameData.PlayerState p : snapshot.players) result.put(p.id, p);
         return result;
     }
 
+    /*
+     * monstersById()
+     * Tạo map ID của quái cho so sánh và áp record nhị phân; không tự chạy AI hoặc lọc theo khoảng cách.
+     */
     private static Map<String, GameData.MonsterState> monstersById(GameData.WorldSnapshot snapshot) {
         Map<String, GameData.MonsterState> result = new LinkedHashMap<>();
         if (snapshot != null) for (GameData.MonsterState m : snapshot.monsters) result.put(m.id, m);
         return result;
     }
 
+    /*
+     * copySnapshot()
+     * Tạo snapshot và các entity mới, chép những trường cần cho hiển thị/baseline. Giữ timestamp, HP, vị
+     * trí, hành động và dữ liệu mạng; không sao toàn bộ AI/path/handler. Bản copy giúp delta không làm
+     * biến đổi baseline và UI không dùng object mô phỏng đang sửa.
+     */
     public static GameData.WorldSnapshot copySnapshot(GameData.WorldSnapshot snapshot) {
         GameData.WorldSnapshot copy = new GameData.WorldSnapshot();
         copy.timestamp = snapshot.timestamp;
@@ -185,6 +294,13 @@ public class GameProtocol {
     }
 
     /** Parses an assembled body into a detached snapshot, without mutating its baseline. */
+    /*
+     * parseSnapshotBinary()
+     * Đọc body đã ghép; dựng snapshot rỗng với full hoặc copy baseline cho delta. Áp record theo flags, xử
+     * lý REMOVE và yêu cầu entity mới có đủ nhóm. Kiểm ID lặp, cờ lạ, tọa độ hữu hạn, count, số byte thừa
+     * và giới hạn cuối bốn player/64 quái/60 item. Trả snapshot tách biệt; dữ liệu không hợp lệ ném
+     * exception.
+     */
     public static GameData.WorldSnapshot parseSnapshotBinary(byte[] body, GameData.WorldSnapshot baseline) {
         ByteBuffer buffer = ByteBuffer.wrap(body);
         GameData.WorldSnapshot snapshot = baseline == null ? new GameData.WorldSnapshot() : copySnapshot(baseline);
@@ -264,21 +380,54 @@ public class GameProtocol {
         return snapshot;
     }
 
+    /*
+     * finite()
+     * Trả lại float nếu hữu hạn; NaN hoặc Infinity gây IllegalArgumentException để chặn tọa độ lỗi trong
+     * snapshot.
+     */
     private static float finite(float value) {
         if (!Float.isFinite(value)) throw new IllegalArgumentException("Non-finite coordinate");
         return value;
     }
 
     /** Bounded fragment assembly; a frame is exposed only after every part arrives. */
+    /*
+     * Ghép mảnh STATE và áp full/delta; chỉ xuất snapshot đầy đủ, đúng stream và baseline.
+     */
     public static final class SnapshotDecoder {
+        /*
+         * Giữ các mảnh của một frame trong lúc chờ đủ; không vẽ dữ liệu dở dang.
+         */
         private static final class Assembly {
+            /*
+             * stream: ID nguồn snapshot của phòng và cờ decoder đã khóa stream.
+             * sequence: Số thứ tự cho input hoặc frame tùy lớp; phân biệt dữ liệu cũ mới.
+             * baseline: Bản full làm mốc delta, sequence của bản mốc và cờ ép phát full mới.
+             * created: Các assembly đang ghép, mảnh byte, số mảnh đã nhận và thời điểm tạo assembly.
+             */
             final long stream, sequence, baseline, created = System.nanoTime();
+            /*
+             * pieces: Các assembly đang ghép, mảnh byte, số mảnh đã nhận và thời điểm tạo assembly.
+             */
             final byte[][] pieces;
+            /*
+             * received: Các assembly đang ghép, mảnh byte, số mảnh đã nhận và thời điểm tạo assembly.
+             */
             int received;
+            /*
+             * Khởi tạo Assembly
+             * Lưu stream/sequence/baseline và cấp mảng byte[count][] cho một frame. created được gán khi
+             * khởi tạo để decoder loại assembly chờ quá lâu.
+             */
             Assembly(long stream, long sequence, long baseline, int count) {
                 this.stream = stream; this.sequence = sequence; this.baseline = baseline;
                 pieces = new byte[count][];
             }
+            /*
+             * body()
+             * Cộng chiều dài các pieces rồi ghép theo thứ tự partIndex vào một byte[] hoàn chỉnh. Caller
+             * chỉ gọi khi đã đủ mảnh; hàm không tự xin truyền lại mảnh thiếu.
+             */
             byte[] body() {
                 int size = 0; for (byte[] piece : pieces) size += piece.length;
                 ByteBuffer result = ByteBuffer.allocate(size);
@@ -286,30 +435,74 @@ public class GameProtocol {
                 return result.array();
             }
         }
+        /*
+         * pending: Các assembly đang ghép, mảnh byte, số mảnh đã nhận và thời điểm tạo assembly.
+         */
         private final Map<Long, Assembly> pending = new LinkedHashMap<>();
+        /*
+         * baseline: Bản full làm mốc delta, sequence của bản mốc và cờ ép phát full mới.
+         */
         private GameData.WorldSnapshot baseline;
+        /*
+         * baselineSequence: Bản full làm mốc delta, sequence của bản mốc và cờ ép phát full mới.
+         * lastSequence: Số thứ tự cho input hoặc frame tùy lớp; phân biệt dữ liệu cũ mới.
+         * stream: ID nguồn snapshot của phòng và cờ decoder đã khóa stream.
+         */
         private long baselineSequence = -1, lastSequence = -1, stream;
+        /*
+         * hasStream: ID nguồn snapshot của phòng và cờ decoder đã khóa stream.
+         */
         private boolean hasStream;
 
+        /*
+         * reset()
+         * Xóa pending, baseline, các sequence và cờ stream của SnapshotDecoder. Được gọi khi rời/vào phòng
+         * hoặc thay thế hệ gameplay để dữ liệu cũ không lẫn vào.
+         */
         public synchronized void reset() {
             pending.clear(); baseline = null; baselineSequence = lastSequence = -1; hasStream = false;
         }
 
+        /*
+         * expectStream()
+         * Nếu stream mong đợi đã trùng thì giữ decoder; nếu khác thì reset và đặt stream mới. Stream do
+         * ACK đăng ký UDP cung cấp, không tự lấy tên phòng làm stream.
+         */
         public synchronized void expectStream(long streamId) {
             if (hasStream && stream == streamId) return;
             reset(); stream = streamId; hasStream = true;
         }
 
+        /*
+         * accept()
+         * Nhận vùng byte của một mảnh STATE, kiểm kích thước/version/stream/sequence/baseline/count, bỏ
+         * gói cũ và assembly quá hai giây. Lưu mảnh chưa có, chỉ parse khi đủ; full cập nhật baseline,
+         * delta cần đúng baseline. Có thể áp delta đã đủ từ trước khi full vừa tới, dọn frame cũ và trả
+         * snapshot mới nhất hoặc null nếu chưa đủ/không hợp lệ. Không phát thế giới nửa chừng.
+         * Trình tự nhận: kiểm kích thước/version → kiểm sequence/baseline/stream/count/index → dọn
+         * assembly quá hạn → thêm mảnh nếu chưa có → chỉ giải mã khi đủ. Full tạo bản copy baseline; delta
+         * cần đúng baseline đã giữ. Nếu delta đủ trước full, decoder có thể xử lý nó khi full tới.
+         * Không có retransmit mảnh trong decoder. Thiếu full baseline có thể làm client phải chờ full tiếp
+         * theo. Gói cũ, trùng hoặc sai định dạng trả null; caller phải coi null là chưa có snapshot để áp,
+         * không phải thế giới rỗng.
+         */
         public synchronized GameData.WorldSnapshot accept(byte[] data, int offset, int length) {
             if (length <= BINARY_HEADER_BYTES || length + UDP_HEADER_BYTES > MAX_STATE_PACKET_BYTES) return null;
             try {
                 ByteBuffer in = ByteBuffer.wrap(data, offset, length);
+                /*
+                 * Version kiểm định dạng snapshot; stream kiểm phòng nguồn, sequence kiểm frame mới/cũ.
+                 */
                 if (in.get() != SNAPSHOT_VERSION) return null;
                 long source = in.getLong(), sequence = in.getLong(), base = in.getLong();
                 int part = Short.toUnsignedInt(in.getShort()), count = Short.toUnsignedInt(in.getShort());
                 if (sequence < 0 || base < 0 || base > sequence || sequence <= lastSequence
                         || count < 1 || count > 64 || part >= count || (hasStream && source != stream)) return null;
                 long now = System.nanoTime();
+                /*
+                 * Callback/lambda: Predicate removeIf dọn assembly quá 2 giây khi xử lý gói đến; không
+                 * phải thread timeout riêng.
+                 */
                 pending.values().removeIf(a -> now - a.created > 2_000_000_000L);
                 Assembly a = pending.get(sequence);
                 if (a == null) {
@@ -321,8 +514,14 @@ public class GameProtocol {
                     byte[] bytes = new byte[in.remaining()]; in.get(bytes);
                     a.pieces[part] = bytes; a.received++;
                 }
+                /*
+                 * Chưa đủ mảnh thì chưa công bố thế giới; không dựng một nửa snapshot.
+                 */
                 if (a.received != count) return null;
                 GameData.WorldSnapshot result;
+                /*
+                 * Full tự làm mốc; delta chỉ được giải mã khi còn đúng full baseline mà nó tham chiếu.
+                 */
                 if (base == sequence) {
                     result = parseSnapshotBinary(a.body(), null);
                     baseline = copySnapshot(result); baselineSequence = sequence;
@@ -333,12 +532,19 @@ public class GameProtocol {
                 }
                 lastSequence = sequence;
                 // Deltas may have completed just before their full baseline arrived.
+                /*
+                 * Delta có thể đến đủ trước full; khi full tới mới xử lý các frame đang chờ phù hợp.
+                 */
                 for (Assembly ready : pending.values()) {
                     if (ready.stream == stream && ready.received == ready.pieces.length
                             && ready.baseline == baselineSequence && ready.sequence > lastSequence) {
                         result = parseSnapshotBinary(ready.body(), baseline); lastSequence = ready.sequence;
                     }
                 }
+                /*
+                 * Callback/lambda: Predicate xóa các frame đang pending có sequence không mới hơn frame đã
+                 * xuất.
+                 */
                 pending.values().removeIf(frame -> frame.sequence <= lastSequence);
                 return result;
             } catch (RuntimeException invalidPacket) {
@@ -347,9 +553,24 @@ public class GameProtocol {
         }
     }
 
+    /*
+     * MAX_LINE_LENGTH_CLIENT: Giới hạn dòng TCP server nhận từ client.
+     */
     public static final int MAX_LINE_LENGTH_CLIENT = 512;
+    /*
+     * MAX_LINE_LENGTH_SERVER: Giới hạn dòng TCP client nhận từ server.
+     */
     public static final int MAX_LINE_LENGTH_SERVER = 2048;
 
+    /*
+     * readLineLimited()
+     * Đọc BufferedReader từng ký tự tới LF, bỏ CR, chặn độ dài vượt giới hạn bằng IOException. EOF chưa có
+     * ký tự trả null; EOF sau dữ liệu còn trả dòng cuối. Hàm chia message TCP, không đọc một gói IP nguyên
+     * vẹn.
+     * TCP là dòng byte nên không dùng một lần read làm ranh giới packet. Hàm đọc ký tự tới LF, bỏ CR, giới
+     * hạn số ký tự; EOF khi chưa có chữ trả null, EOF sau một phần dòng trả phần đã đọc. Vượt giới hạn ném
+     * IOException để tầng kết nối xử lý.
+     */
     public static String readLineLimited(BufferedReader in, int maxLength) throws IOException {
         StringBuilder sb = new StringBuilder();
         int c;
@@ -367,6 +588,11 @@ public class GameProtocol {
         return sb.toString();
     }
 
+    /*
+     * sanitizeName()
+     * Loại dấu ; , : | và khoảng trắng, dùng Player nếu rỗng, cắt tối đa 16 ký tự Java. Bảo vệ cú pháp tên
+     * trong protocol; không chứng minh danh tính hoặc quyền sở hữu save.
+     */
     public static String sanitizeName(String name) {
         if (name == null) return "Player";
         String clean = name.replaceAll("[;,:|\\s]", "").trim();
@@ -374,6 +600,11 @@ public class GameProtocol {
         return clean.length() > 16 ? clean.substring(0, 16) : clean;
     }
 
+    /*
+     * sanitizeRoom()
+     * Thay khoảng trắng thành gạch dưới, bỏ dấu phân cách, dùng Room1 nếu rỗng và cắt tối đa 20 ký tự
+     * Java. Đây chưa phải xác thực tài khoản hay kiểm soát toàn diện đường dẫn file.
+     */
     public static String sanitizeRoom(String room) {
         if (room == null) return "Room1";
         String clean = room.replaceAll("\\s+", "_").replaceAll("[;,:|]", "").trim();
@@ -381,12 +612,26 @@ public class GameProtocol {
         return clean.length() > 20 ? clean.substring(0, 20) : clean;
     }
 
+    /*
+     * fmt2()
+     * Làm tròn bằng Math.round(v × 100) / 100 rồi Float.toString. Kết quả có tối đa độ chính xác hai chữ
+     * số thập phân theo phép làm tròn đó, không cố định đủ hai số 0 ở cuối như String.format %.2f; dùng
+     * trong tiện ích snapshot văn bản.
+     */
     public static String fmt2(float v) {
         return Float.toString(Math.round(v * 100f) / 100f);
     }
 
+    /*
+     * UDP_HEADER_BYTES: Số byte magic GAM1 cộng opcode.
+     */
     public static final int UDP_HEADER_BYTES = 5;
 
+    /*
+     * createGameUdpPacket()
+     * Nhận payload chuỗi, chuyển UTF-8 rồi gọi bản byte[]. Dùng cho REGISTER/INPUT/PING/PONG/ACK có
+     * payload văn bản.
+     */
     public static byte[] createGameUdpPacket(byte type, String payload) {
         byte[] payloadBytes = payload == null ? new byte[0] : payload.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] packet = new byte[UDP_HEADER_BYTES + payloadBytes.length];
@@ -398,6 +643,11 @@ public class GameProtocol {
         return packet;
     }
 
+    /*
+     * createGameUdpPacket()
+     * Cấp byte[] dài 5 + payload, ghi GAM1, opcode và dữ liệu nguyên byte. Đây là wrapper chung cho cả
+     * binary STATE, không tự cung cấp độ tin cậy UDP.
+     */
     public static byte[] createGameUdpPacket(byte type, byte[] payloadBytes) {
         if (payloadBytes == null) payloadBytes = new byte[0];
         byte[] packet = new byte[UDP_HEADER_BYTES + payloadBytes.length];
@@ -409,6 +659,11 @@ public class GameProtocol {
         return packet;
     }
 
+    /*
+     * isGameUdpPacket()
+     * Kiểm có tối thiểu header và bốn byte magic GAM1. Đúng magic chưa đồng nghĩa payload đã hợp lệ hoặc
+     * người gửi đã được xác thực.
+     */
     public static boolean isGameUdpPacket(byte[] data, int length) {
         if (data == null || length < UDP_HEADER_BYTES) return false;
         return data[0] == Common.UDP_MAGIC_GAME_BYTES[0]
@@ -417,10 +672,19 @@ public class GameProtocol {
             && data[3] == Common.UDP_MAGIC_GAME_BYTES[3];
     }
 
+    /*
+     * getGameUdpType()
+     * Lấy byte opcode ở vị trí sau magic; caller cần bảo đảm header đã được kiểm trước.
+     */
     public static byte getGameUdpType(byte[] data) {
         return data[4];
     }
 
+    /*
+     * getGameUdpPayload()
+     * Giải mã phần sau header trong vùng offset/length thành UTF-8. Không dùng hàm này để giải mã body
+     * STATE nhị phân.
+     */
     public static String getGameUdpPayload(byte[] data, int offset, int length) {
         int payloadLen = length - UDP_HEADER_BYTES;
         if (payloadLen <= 0) return "";
@@ -428,6 +692,12 @@ public class GameProtocol {
     }
 
     // Đóng gói Snapshot từ Server thành Chuỗi Message
+    /*
+     * serializeSnapshot()
+     * Chuyển player/quái/item thành chuỗi STATE phục vụ tiện ích, callback tương thích và test. Có làm
+     * tròn tọa độ và không giữ đầy đủ mọi trường như binary; ServerGame hiện không gửi STATE qua TCP bằng
+     * hàm này.
+     */
     public static String serializeSnapshot(GameData.WorldSnapshot snapshot) {
         StringBuilder sb = new StringBuilder(Common.CMD_STATE);
 
@@ -471,6 +741,12 @@ public class GameProtocol {
     }
 
     // Giải mã Chuỗi Message thành WorldSnapshot trên Client
+    /*
+     * parseSnapshot()
+     * Tách chuỗi snapshot văn bản thành ba danh sách entity, kiểm/cố gắng xử lý các record và bỏ phần
+     * không parse được theo logic trong hàm. Dùng trong đường tương thích/test; khác parseSnapshotBinary
+     * đang đi qua UDP online.
+     */
     public static GameData.WorldSnapshot parseSnapshot(String line) {
         GameData.WorldSnapshot snapshot = new GameData.WorldSnapshot();
         if (!line.startsWith(Common.CMD_STATE)) return snapshot;

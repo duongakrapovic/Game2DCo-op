@@ -9,19 +9,56 @@ import java.util.*;
 /**
  * GAMEMAP.JAVA - Nạp TMX/TSX, quản lý 9 Chunk dữ liệu bản đồ & Render Tilemap
  */
+/*
+ * Cầu nối dữ liệu bản đồ với va chạm, spawn và render. Server dùng collision mà không cần ảnh; client dùng
+ * cùng hệ tọa độ để dự đoán/vẽ. Nạp sai map phải báo lỗi hoặc coi khu vực chưa tải là chặn, tránh sinh
+ * nhân vật trong vùng vô hiệu.
+ * tiles giữ ảnh/thuộc tính từng tile; loadedChunks ánh xạ tọa độ tới các layer. collisionTiles và
+ * propertiesLoaded dùng cho collision; collisionMapLoaded ngăn nạp lặp; spawnReachable cache flood fill.
+ * Tile chủ yếu là dữ liệu và không có constructor viết tường minh trong source.
+ */
 public class GameMap {
 
+    /*
+     * Một tile gồm ảnh hiển thị và cờ collision.
+     */
     public static class Tile {
+        /*
+         * image: Ảnh/cờ tile hoặc cấu trúc chunk chứa chỉ số tile và mọi layer của TMX.
+         */
         public BufferedImage image;
+        /*
+         * collision: Ảnh/cờ tile hoặc cấu trúc chunk chứa chỉ số tile và mọi layer của TMX.
+         */
         public boolean collision = false;
     }
 
+    /*
+     * Một phần bản đồ giữ mọi layer tile để vẽ và kiểm vật cản.
+     */
     public static class Chunk {
+        /*
+         * chunkX, chunkY: Ảnh/cờ tile hoặc cấu trúc chunk chứa chỉ số tile và mọi layer của TMX.
+         */
         public int chunkX, chunkY;
+        /*
+         * size: Ảnh/cờ tile hoặc cấu trúc chunk chứa chỉ số tile và mọi layer của TMX.
+         */
         public int size;
+        /*
+         * mapTileNum: Ảnh/cờ tile hoặc cấu trúc chunk chứa chỉ số tile và mọi layer của TMX.
+         */
         public int[][] mapTileNum;
+        /*
+         * layers: Ảnh/cờ tile hoặc cấu trúc chunk chứa chỉ số tile và mọi layer của TMX.
+         */
         public int[][][] layers;
 
+        /*
+         * Khởi tạo Chunk
+         * Gán chunkX/chunkY/size và cấp mảng mapTileNum[size][size]. Mảng layers được loadChunkFromFile
+         * cấp sau khi biết số layer của XML.
+         */
         public Chunk(int chunkX, int chunkY, int size) {
             this.chunkX = chunkX;
             this.chunkY = chunkY;
@@ -30,16 +67,48 @@ public class GameMap {
         }
     }
 
+    /*
+     * spawnReachable: Tile ảnh/collision, cờ đã nạp và cache chunk/vùng nối với spawn.
+     */
     private boolean[] spawnReachable;
+    /*
+     * propertiesLoaded: Tile ảnh/collision, cờ đã nạp và cache chunk/vùng nối với spawn.
+     */
     private boolean propertiesLoaded;
+    /*
+     * collisionMapLoaded: Tile ảnh/collision, cờ đã nạp và cache chunk/vùng nối với spawn.
+     */
     private volatile boolean collisionMapLoaded;
+    /*
+     * tiles: Tile ảnh/collision, cờ đã nạp và cache chunk/vùng nối với spawn.
+     */
     private Tile[] tiles;
+    /*
+     * collisionTiles: Tile ảnh/collision, cờ đã nạp và cache chunk/vùng nối với spawn.
+     */
     private final Set<Integer> collisionTiles = new HashSet<>();
+    /*
+     * chunkSize: Ảnh/cờ tile hoặc cấu trúc chunk chứa chỉ số tile và mọi layer của TMX.
+     */
     private final int chunkSize = Common.CHUNK_SIZE;
+    /*
+     * loadedChunks: Tile ảnh/collision, cờ đã nạp và cache chunk/vùng nối với spawn.
+     */
     private final Map<String, Chunk> loadedChunks = new HashMap<>();
 
+    /*
+     * Khởi tạo GameMap
+     * Constructor có body rỗng. Các field initializer đã tạo loadedChunks/collisionTiles; chưa có bảng
+     * Tile hay chunk/collision được nạp. ensureCollisionMapLoaded hoặc loadTilesetImage mới thực hiện bước
+     * nạp tương ứng.
+     */
     public GameMap() {}
 
+    /*
+     * initTileset()
+     * Cấp phát mảng Tile với số phần tử yêu cầu và tạo từng Tile rỗng. Body chỉ khởi tạo bảng tile, không
+     * tự nạp ảnh, chunk hoặc reset cờ collision/cache liên thông; các bước nạp map do hàm khác quản lý.
+     */
     public void initTileset(int totalTiles) {
         tiles = new Tile[totalTiles];
         for (int i = 0; i < totalTiles; i++) {
@@ -47,11 +116,24 @@ public class GameMap {
         }
     }
 
+    /*
+     * openResource()
+     * Nếu file tại đường dẫn tồn tại thì mở FileInputStream, nếu không thử lấy resource cùng đường dẫn từ
+     * classpath. Có thể trả null khi classpath không có; caller kiểm để báo thiếu tài nguyên. Được
+     * override trong test để cung cấp XML trong RAM.
+     */
     protected InputStream openResource(String path) throws IOException {
         File file = new File(path);
         return file.exists() ? new FileInputStream(file) : getClass().getResourceAsStream("/" + path);
     }
 
+    /*
+     * loadTilesetImage()
+     * Mở và đọc ảnh tileset, tính số ô theo originalTileSize, cấp bảng Tile nếu cần rồi gắn từng subimage
+     * kích thước gốc. Việc phóng lên TILE_SIZE diễn ra khi draw. Body bắt Exception và chỉ log stderr,
+     * không ném lại như ClientRenderer.loadRequiredImage; caller không nhận kết quả thành công/ thất bại
+     * rõ từ void này.
+     */
     public void loadTilesetImage(String pngPath, int originalTileSize) {
         try (InputStream is = openResource(pngPath)) {
             if (is == null) throw new FileNotFoundException("Không tìm thấy file ảnh Tileset: " + pngPath);
@@ -79,6 +161,11 @@ public class GameMap {
         }
     }
 
+    /*
+     * readXml()
+     * Tạo DOM parser với DTD/external entity bị vô hiệu hóa rồi parse InputStream. Đây là lớp bảo vệ khi
+     * đọc XML map, không phải parser JSON hay mạng.
+     */
     private org.w3c.dom.Document readXml(InputStream input) throws Exception {
         if (input == null) throw new FileNotFoundException("Map resource not found");
         javax.xml.parsers.DocumentBuilderFactory factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
@@ -90,6 +177,12 @@ public class GameMap {
         return factory.newDocumentBuilder().parse(input);
     }
 
+    /*
+     * loadTilesetProperties()
+     * Đọc TSX, tra từng tile ID và thuộc tính collision dạng true/1, hỗ trợ giá trị ở attribute hoặc nội
+     * dung. Kiểm dữ liệu cần thiết và báo lỗi nếu metadata không hợp lệ; không coi thiếu collision là tất
+     * cả đi được.
+     */
     public void loadTilesetProperties(String tsxPath) {
         spawnReachable = null;
         propertiesLoaded = false;
@@ -119,6 +212,18 @@ public class GameMap {
         }
     }
 
+    /*
+     * loadChunkFromFile()
+     * Nhận tọa độ chunk và thư mục, đọc TMX, kiểm 32×32 tile, tileset/firstgid và layer encoding CSV.
+     * Chuyển GID sang chỉ số tile, mask cờ flip và kiểm đủ dữ liệu/phạm vi. Trả Chunk đã nạp hoặc phát
+     * sinh lỗi, không lấp chunk hỏng bằng nền trống an toàn giả.
+     * Trình tự: mở chunkX_Y.tmx; kiểm root map và kích thước 32×32; nhận firstgid; chỉ hỗ trợ một tileset.
+     * Mỗi layer phải có data encoding csv và đủ 1024 số. GID bị bỏ cờ flip bằng mask rồi trừ firstgid; 0
+     * trở thành ô trống -1.
+     * Kết quả Chunk giữ mọi layer để collision xét cả lớp nền và vật cản; mapTileNum trỏ layer đầu. Sai
+     * cấu trúc, ID hoặc thiếu tài nguyên phát IllegalStateException. CSV ở đây là các số ID tile nằm trong
+     * XML TMX, không phải dữ liệu giao thức mạng hay save player.
+     */
     public Chunk loadChunkFromFile(int chunkX, int chunkY, String folderPath) {
         String path = folderPath + "/chunk" + chunkX + "_" + chunkY + ".tmx";
         try (InputStream input = openResource(path)) {
@@ -141,6 +246,9 @@ public class GameMap {
                 String[] numbers = data.getTextContent().trim().split(",");
                 if (numbers.length != chunkSize * chunkSize) throw new IOException("Incomplete tile layer");
                 for (int index = 0; index < numbers.length; index++) {
+                    /*
+                     * Bỏ các cờ flip của Tiled rồi đổi GID sang chỉ số tile local theo firstgid.
+                     */
                     long gid = Long.parseLong(numbers[index].trim()) & 0x0fffffffL;
                     int tile = gid == 0 ? -1 : Math.toIntExact(gid - firstGid);
                     if (tile < -1 || (tiles != null && tile >= tiles.length)) throw new IOException("Tile ID outside tileset");
@@ -154,6 +262,11 @@ public class GameMap {
         }
     }
 
+    /*
+     * loadAllChunks()
+     * Duyệt tọa độ chunk theo hai giới hạn, gọi loadChunkFromFile và lưu vào map chunk. Sau thay đổi dữ
+     * liệu phải tính lại cache liên thông; thiếu file làm luồng nạp thất bại.
+     */
     public void loadAllChunks(String folderPath, int maxChunkX, int maxChunkY) {
         collisionMapLoaded = false;
         spawnReachable = null;
@@ -166,6 +279,14 @@ public class GameMap {
         collisionMapLoaded = propertiesLoaded && maxChunkX == Common.MAX_CHUNK_X && maxChunkY == Common.MAX_CHUNK_Y;
     }
 
+    /*
+     * ensureCollisionMapLoaded()
+     * Nếu đã nạp thì thoát; nếu chưa thì tải properties trước rồi đủ chín chunk của map hiện hành, đánh
+     * dấu thành công sau cùng. ClientApp và ServerGame gọi trước khi chạy gameplay.
+     * Thứ tự bắt buộc là cấp tile → đọc collision từ tileset.tsx → đọc đủ 3×3 chunk → xác nhận ready. Khi
+     * đã ready thì return sớm, tránh reset map mỗi lần vào phòng. Không có ảnh sprite vẫn có thể kiểm
+     * collision trên server; dữ liệu collision mới là yêu cầu của mô phỏng.
+     */
     public synchronized void ensureCollisionMapLoaded() {
         if (collisionMapLoaded) return;
         initTileset(256);
@@ -174,9 +295,18 @@ public class GameMap {
         if (!collisionMapLoaded) throw new IllegalStateException("Map is not ready");
     }
 
+    /*
+     * isCollisionAtWorld()
+     * Đổi pixel thế giới thành chunk/tile nội bộ và kiểm các layer. Trả true khi ngoài biên, chưa có
+     * metadata/chunk, tile collision hoặc ô hoàn toàn rỗng theo luật hiện tại. Hàm là nền cho physics, LOS
+     * và test.
+     */
     public boolean isCollisionAtWorld(int worldX, int worldY) {
         int maxWidth = Common.MAX_CHUNK_X * chunkSize * Common.TILE_SIZE;
         int maxHeight = Common.MAX_CHUNK_Y * chunkSize * Common.TILE_SIZE;
+        /*
+         * Thiếu map, ra ngoài biên hoặc chưa nạp collision được coi là bị chặn.
+         */
         if (!propertiesLoaded || worldX < 0 || worldY < 0 || worldX >= maxWidth || worldY >= maxHeight) return true;
         int col = worldX / Common.TILE_SIZE, row = worldY / Common.TILE_SIZE;
         Chunk chunk = loadedChunks.get((col / chunkSize) + "_" + (row / chunkSize));
@@ -191,6 +321,11 @@ public class GameMap {
         return !hasGround;
     }
 
+    /*
+     * isWalkable()
+     * Trả boolean cho một hitbox entity đầy đủ đặt tại x/y: kiểm float hữu hạn, trong giới hạn và bốn góc
+     * không bị chặn. Một điểm trung tâm trống không đủ để trả true.
+     */
     public boolean isWalkable(float x, float y) {
         int size = GamePhysics.ENTITY_SIZE;
         int maxWidth = Common.MAX_CHUNK_X * chunkSize * Common.TILE_SIZE;
@@ -203,6 +338,11 @@ public class GameMap {
                 && !isCollisionAtWorld(left, bottom) && !isCollisionAtWorld(right, bottom);
     }
 
+    /*
+     * validatedPlayerSpawn()
+     * Giữ tọa độ save nếu hợp lệ và không phải điểm rỗng (0,0); nếu không, dùng spawn mặc định đã kiểm.
+     * Trả Point2D.Float nên giữ được phần lẻ hợp lệ; nếu cả spawn mặc định bị chặn thì ném lỗi.
+     */
     public java.awt.geom.Point2D.Float validatedPlayerSpawn(float x, float y) {
         boolean valid = !(x == 0 && y == 0) && isWalkable(x, y);
         if (!valid) { x = Common.SPAWN_X; y = Common.SPAWN_Y; }
@@ -211,6 +351,15 @@ public class GameMap {
     }
 
     /** Flood fill on entity-sized standable cells, invalidated whenever collision data reloads. */
+    /*
+     * isSpawnReachableAtWorld()
+     * Lười tạo vùng đi được bằng flood fill bốn hướng từ spawn trên grid, dùng hitbox đi được; sau đó trả
+     * xem tọa độ yêu cầu thuộc vùng liên thông hay không. Cache giúp nhiều lần chọn spawn không phải flood
+     * fill lại.
+     * Lần đầu dùng BFS bốn hướng từ ô spawn, chỉ qua ô có thể đặt vừa entity; lưu mảng reachable cho các
+     * lần tra sau. Reload collision làm mất cache này. Hàm này bổ sung điều kiện liên thông; một điểm đứng
+     * được nhưng nằm trên đảo cỏ bị tách rời vẫn không được coi là spawn hợp lệ.
+     */
     public synchronized boolean isSpawnReachableAtWorld(int x, int y) {
         int width = Common.MAX_CHUNK_X * chunkSize, height = Common.MAX_CHUNK_Y * chunkSize;
         if (x < 0 || y < 0 || x >= width * Common.TILE_SIZE || y >= height * Common.TILE_SIZE) return false;
@@ -222,6 +371,10 @@ public class GameMap {
             int[] queue = new int[reachable.length];
             int start = startY * width + startX, head = 0, tail = 0;
             queue[tail++] = start; reachable[start] = true;
+            /*
+             * Flood fill bốn hướng từ spawn, chỉ đi qua ô đặt vừa entity; tránh sinh quái/bình trên đảo cô
+             * lập.
+             */
             while (head < tail) {
                 int current = queue[head++], col = current % width, row = current / width;
                 for (int direction = 0; direction < 4; direction++) {
@@ -238,6 +391,11 @@ public class GameMap {
         return spawnReachable[(y / Common.TILE_SIZE) * width + x / Common.TILE_SIZE];
     }
 
+    /*
+     * draw()
+     * Từ focus và kích thước viewport suy ra camera, cắt phạm vi chunk/tile có thể thấy rồi vẽ layer/ảnh
+     * đúng tọa độ màn hình. Culling chỉ giảm vẽ, không phải lọc entity mạng theo vùng quan tâm.
+     */
     public void draw(Graphics2D g2, int focusWorldX, int focusWorldY, int screenWidth, int screenHeight) {
         g2.setColor(Color.BLACK);
         g2.fillRect(0, 0, screenWidth, screenHeight);
